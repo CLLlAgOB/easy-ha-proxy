@@ -45,6 +45,9 @@ func (a *ACL) Check(sys *System) (Change, error) {
 	if _, err := os.Lstat(sys.Path(a.Path)); errors.Is(err, os.ErrNotExist) {
 		return Change{}, fmt.Errorf("path %s does not exist", a.Path)
 	}
+	if err := refuseSymlink(sys.Path(a.Path)); err != nil {
+		return Change{}, err
+	}
 	args := a.args(true)
 	args[len(args)-1] = sys.Path(a.Path)
 	out, code, err := sys.Exec("setfacl", args...)
@@ -68,6 +71,9 @@ func (a *ACL) Check(sys *System) (Change, error) {
 }
 
 func (a *ACL) Apply(sys *System, _ Change) error {
+	if err := refuseSymlink(sys.Path(a.Path)); err != nil {
+		return err
+	}
 	args := a.args(false)
 	args[len(args)-1] = sys.Path(a.Path)
 	out, code, err := sys.Exec("setfacl", args...)

@@ -132,6 +132,38 @@ func TestFileWritesOnlyWhatDiffers(t *testing.T) {
 	}
 }
 
+// A symlink planted in a container-writable directory must not let a
+// primitive read, chmod or write the host file it points at.
+func TestPrimitivesRefuseSymlinks(t *testing.T) {
+	f := newFake(t)
+	f.write(t, "/etc/easy-ha-proxy/daemons.env", "TOKEN=secret\n", 0o600)
+	if err := os.MkdirAll(f.Path("/opt/haproxy-admin/config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(f.Path("/etc/easy-ha-proxy/daemons.env"), f.Path("/opt/haproxy-admin/config/vars.yml")); err != nil {
+		t.Fatal(err)
+	}
+	lif := &LineInFile{Path: "/opt/haproxy-admin/config/vars.yml", Regexp: regexp.MustCompile(`^TOKEN=`), Line: "TOKEN=x", Mode: 0o644}
+	if _, err := lif.Check(f.System); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("LineInFile followed a symlink: %v", err)
+	}
+	if err := (&Touch{Path: "/opt/haproxy-admin/config/vars.yml", Mode: 0o644}).Apply(f.System, Change{}); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Touch followed a symlink: %v", err)
+	}
+	if err := (&ACL{Path: "/opt/haproxy-admin/config/vars.yml", User: "haproxyadmin", Perms: "r"}).Apply(f.System, Change{}); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("ACL followed a symlink: %v", err)
+	}
+	if err := os.Symlink(f.Path("/etc"), f.Path("/opt/authelia-logs")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Dir{Path: "/opt/authelia-logs", Mode: 0o750}).Check(f.System); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Dir followed a symlink: %v", err)
+	}
+	if raw, _ := os.ReadFile(f.Path("/etc/easy-ha-proxy/daemons.env")); string(raw) != "TOKEN=secret\n" {
+		t.Fatalf("the host secret was modified: %q", raw)
+	}
+}
+
 // validate: checks the new content in a temporary file, with the
 // environment the task gives it; a refusal leaves the old file and no
 // temporary one behind.

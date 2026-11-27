@@ -215,6 +215,9 @@ func (l *LineInFile) Describe() string { return "line in " + l.Path }
 
 func (l *LineInFile) Check(sys *System) (Change, error) {
 	l.write = false
+	if err := refuseSymlink(sys.Path(l.Path)); err != nil {
+		return Change{}, err
+	}
 	raw, err := os.ReadFile(sys.Path(l.Path))
 	if errors.Is(err, os.ErrNotExist) {
 		return Change{}, fmt.Errorf("destination %s does not exist", l.Path)

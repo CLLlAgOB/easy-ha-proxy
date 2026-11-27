@@ -149,7 +149,28 @@ func writeAtomicChecked(path string, content []byte, uid, gid int, mode os.FileM
 	return nil
 }
 
+// refuseSymlink errors if path is a symlink, so a primitive never reads,
+// chmods or writes through a link planted in a container-writable directory
+// (e.g. /opt/haproxy-admin/config/vars.yml -> /etc/easy-ha-proxy/daemons.env).
+// A missing path is allowed: the create primitives handle it.
+func refuseSymlink(path string) error {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink; refusing to follow it", path)
+	}
+	return nil
+}
+
 func setAttrs(path string, uid, gid int, mode os.FileMode) error {
+	if err := refuseSymlink(path); err != nil {
+		return err
+	}
 	if uid >= 0 || gid >= 0 {
 		if err := os.Lchown(path, uid, gid); err != nil {
 			return err
@@ -196,6 +217,9 @@ func (d *Dir) Describe() string { return "directory " + d.Path }
 
 func (d *Dir) Check(sys *System) (Change, error) {
 	d.create = false
+	if err := refuseSymlink(sys.Path(d.Path)); err != nil {
+		return Change{}, err
+	}
 	fi, err := os.Stat(sys.Path(d.Path))
 	if errors.Is(err, os.ErrNotExist) {
 		d.create = true
@@ -305,6 +329,9 @@ func (t *Touch) Check(sys *System) (Change, error) {
 
 func (t *Touch) Apply(sys *System, _ Change) error {
 	path := sys.Path(t.Path)
+	if err := refuseSymlink(path); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
