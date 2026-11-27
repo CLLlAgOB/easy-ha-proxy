@@ -2014,8 +2014,12 @@
     const plans = CHARTS.map((chart) => chartPlan(chart, params, seconds, refreshing, now));
 
     try {
-      // Everything is asked for at once; it is drawn in the order below.
       const summaryRequest = getJson("/api/monitoring/summary", params);
+      // Give the visible plots priority over supplementary requests and draw
+      // each series as soon as its data and the summary settings are ready.
+      const chartRequests = chartsDue
+        ? plans.map((plan) => plan && getJson("/api/monitoring/series", plan.query).catch(() => null))
+        : null;
       const timelineRequest = monitorOn("availability")
         ? getJson("/api/monitoring/states", params).catch(() => null)
         : Promise.resolve(null);
@@ -2029,14 +2033,6 @@
       const eventsRequest = showEvents && chartsDue
         ? getJson("/api/monitoring/events", eventsParams()).catch(() => null)
         : null;
-      const chartsRequest = chartsDue
-        ? Promise.all(
-            plans.map((plan) =>
-              plan ? getJson("/api/monitoring/series", plan.query).catch(() => null) : null
-            )
-          )
-        : null;
-      if (chartsRequest) chartsRequest.catch(() => null);
 
       const summary = await summaryRequest;
       showUnavailable(false);
@@ -2051,26 +2047,14 @@
       renderSummary(summary);
       renderStorage(summary.storage);
 
-      const timeline = await timelineRequest;
-      if (monitorOn("availability")) renderTimeline(timeline);
-      // After the timeline: both write the note beside the heading, and the
-      // list on show has the last word.
-      if (backendsView === "traffic") await loadBackendTraffic();
-      if (backendsView === "requests") await loadBackendRequests();
-      await channelsRequest;
-      renderAttention(await attentionRequest);
-      if (eventsRequest) eventsState = await eventsRequest;
-
-      const results = chartsRequest ? await chartsRequest : [];
-      if (chartsRequest) {
-        chartsView = view;
-        if (plans.every((plan) => !plan || plan.from === null)) chartsFetchedAt = now;
-      }
-      results.forEach((answer, index) => {
+      const drawn = [];
+      if (eventsRequest && view !== chartsView) eventsState = null;
+      const chartsRendered = chartRequests && Promise.all(chartRequests.map(async (request, index) => {
+        if (!request) return;
+        const answer = await request;
         const chart = CHARTS[index];
         const plan = plans[index];
-        // Switched off: not asked for, nothing to draw.
-        if (!plan) return;
+        if (!chartOn(chart.name)) return;
         const last = lastCharts[chart.name];
         let payload = answer;
         if (plan.from !== null) {
@@ -2081,6 +2065,7 @@
         }
         lastCharts[chart.name] = payload ? { payload: payload, seconds: seconds } : null;
         redrawChart(chart.name);
+        if (payload) drawn.push(chart.name);
         if (payload && index === 0) {
           // Always in minutes: "min" is already in the catalog, and one unit
           // keeps the reading comparable as the server changes resolution.
@@ -2090,8 +2075,27 @@
             `${uiText("Resolution")}: ${formatCount(step / 60)} ${uiText("min")}`
           );
         }
+      }));
+
+      const backendsRendered = timelineRequest.then(async (timeline) => {
+        if (monitorOn("availability")) renderTimeline(timeline);
+        // The selected list has the last word on the note beside the heading.
+        if (backendsView === "traffic") await loadBackendTraffic();
+        if (backendsView === "requests") await loadBackendRequests();
       });
-      renderEventsCount();
+      const eventsRendered = eventsRequest && eventsRequest.then((events) => {
+        eventsState = events;
+        if (showEvents) drawn.forEach(redrawChart);
+        renderEventsCount();
+      });
+      await Promise.all([
+        chartsRendered, backendsRendered, channelsRequest, attentionRequest.then(renderAttention), eventsRendered
+      ]);
+      if (chartsRendered) {
+        chartsView = view;
+        if (plans.every((plan) => !plan || plan.from === null)) chartsFetchedAt = now;
+      }
+      if (!eventsRequest) renderEventsCount();
     } catch (error) {
       showUnavailable(Boolean(error.unavailable));
       CHARTS.forEach((chart) => {
