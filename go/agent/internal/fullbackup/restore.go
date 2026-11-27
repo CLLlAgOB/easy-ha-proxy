@@ -836,10 +836,14 @@ func restoreBackup(o restoreOptions) error {
 		if rollback == "" {
 			return "", backupErrorf("Restore failed and no previous managed state was available for automatic rollback: %v", restoreErr)
 		}
+		// Put the previous files back while the daemons are still stopped,
+		// then resume them: starting guardd/alertd before their SQLite files
+		// are restored would open a torn WAL.
+		rollbackErr := restorePreviousState(rollback, restoreSSH, o.apply && installed)
 		q.resumeUnits()
-		if err := restorePreviousState(rollback, restoreSSH, o.apply && installed); err != nil {
+		if rollbackErr != nil {
 			return "", backupErrorf("Restore failed and automatic rollback also failed. Restore error: %v. Rollback archive: %s. "+
-				"Rollback error: %v", restoreErr, rollback, err)
+				"Rollback error: %v", restoreErr, rollback, rollbackErr)
 		}
 		cleanupPreRestoreBackup(rollback)
 		return "", backupErrorf("Restore failed; the previous managed state was restored automatically. Restore error: %v", restoreErr)

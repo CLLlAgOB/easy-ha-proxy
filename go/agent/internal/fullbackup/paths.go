@@ -130,6 +130,7 @@ var (
 		// place in the access log.
 		"easy-ha-proxy-guardd.service",
 		"easy-ha-proxy-alertd.service",
+		"easy-ha-proxy-metricsd.service",
 		"easy-ha-proxy-geoip-update.timer",
 		"easy-ha-proxy-geoip-update.service",
 		"haproxy-certd.service",
