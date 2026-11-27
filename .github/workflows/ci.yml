@@ -432,9 +432,10 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          python-version: '3.12'
+          go-version-file: go/agent/go.mod
+          cache: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: go-panel-binaries
@@ -448,19 +449,20 @@ jobs:
           name: rust-guardd-binaries
           path: parity/guardd
       - name: Panel and agent smoke
+        working-directory: go/agent
         env:
           PANEL_BIN: ${{ github.workspace }}/parity/panel/easy-ha-proxy-panel-linux-${{ matrix.arch }}
           AGENT_BIN: ${{ github.workspace }}/parity/agent/easy-ha-proxy-agent-linux-${{ matrix.arch }}
         run: |
           chmod +x "$PANEL_BIN" "$AGENT_BIN"
-          python .tests/integration/native_smoke.py
+          go test -count=1 -run NativeSmoke -v ./internal/contract
       - name: The packaged guardd-core
+        working-directory: go/agent
         env:
-          PYTHONPATH: .tests
-          GUARDD_RUST_BIN: parity/guardd/guardd-core-linux-${{ matrix.arch }}
+          GUARDD_RUST_BIN: ${{ github.workspace }}/parity/guardd/guardd-core-linux-${{ matrix.arch }}
         run: |
           chmod +x "$GUARDD_RUST_BIN"
-          python -m unittest -v test_rust_guardd
+          go test -count=1 -run Guardd -v ./internal/contract
 
   rust-vulnerabilities:
     name: Rust dependency audit
