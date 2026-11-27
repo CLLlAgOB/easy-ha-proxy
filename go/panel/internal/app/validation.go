@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -870,6 +871,11 @@ func SiteIdentityConflict(candidate *Map, others []any) string {
 	name := orStr(candidate.Value("name"))
 	serving := candidate.Value("paused") != true
 	routing := routingNames(candidate)
+	if serving {
+		if c := signInPortalConflict(candidate); c != "" {
+			return c
+		}
+	}
 	for _, o := range others {
 		other, ok := asMap(o)
 		if !ok {
@@ -947,13 +953,16 @@ func noSharedHAProxyNames(entries []any, label string) error {
 }
 
 var protectedVarsKeys = []string{"admin_authelia_enabled", "admin_domain", "admin_ips_file", "admin_password",
-	"aut_domain", "authelia_enabled", "backend_ssl_verify_ca_file", "haproxy_certs_dir", "haproxy_mtls_dir",
+	"aut_domain", "authelia_enabled", "authelia_extra_domains", "backend_ssl_verify_ca_file", "haproxy_certs_dir", "haproxy_mtls_dir",
 	"haproxy_server_state_file", "haproxy_socket", "haproxy_socket_group", "metrics_export_enabled",
 	"metrics_scrape_sources", "root_domain", "whitelist_geo_file", "whitelist_global_file"}
 
 // ValidateProtectedVarsUnchanged is validate_protected_vars_unchanged.
-func ValidateProtectedVarsUnchanged(existing, candidate *Map) error {
+func ValidateProtectedVarsUnchanged(existing, candidate *Map, allow ...string) error {
 	for _, key := range protectedVarsKeys {
+		if slices.Contains(allow, key) {
+			continue
+		}
 		if !pyEqual(existing.Value(key), candidate.Value(key)) {
 			return valueErr("Protected variable %s cannot be modified from the web interface", pyRepr(key))
 		}

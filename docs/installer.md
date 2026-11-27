@@ -654,6 +654,9 @@ For a migration from `old.example.com` to `new.example.net`, the command:
 
 Old certificates are not removed immediately, allowing manual rollback.
 Authelia sessions bound to the previous cookie domain may require login again.
+Extra Authelia sign-in domains (added on the panel's Authelia settings page)
+stay as they are; a new root domain that equals one of them, or lies above or
+below one, is refused until that sign-in domain is removed.
 
 Plan only from the workstation:
 

@@ -18,6 +18,13 @@ session:
     - domain: "{{ authelia_cookie_domain }}"
       authelia_url: "{{ authelia_portal_url }}"
       default_redirection_url: "{{ authelia_default_redirection_url }}"
+{# Extra sign-in domains (vars.yml authelia_extra_domains, set on the panel's
+   Authelia settings page): a cookie domain each, with its own portal. #}
+{% for _extra in authelia_extra_domains | default([], true) %}
+    - domain: "{{ _extra.domain }}"
+      authelia_url: "https://{{ _extra.portal }}"
+      default_redirection_url: "https://{{ _extra.portal }}/access_granted"
+{% endfor %}
 {% if authelia_session_redis_enabled | default(true) %}
   redis:
     host: "{{ authelia_session_redis_host }}"
@@ -107,6 +114,15 @@ totp:
 {%         set _ = _gate_rules.append({'domain': _hn, 'policy': 'one_factor'}) %}
 {%       endif %}
 {%     endfor %}
+{%   endif %}
+{% endfor %}
+{# The portal of each extra sign-in domain answers /access_granted after a
+   sign-in, as aut_domain does; the panel adds this rule when the domain is
+   added, and this keeps it on a gateway whose rules lost it. #}
+{% for _extra in authelia_extra_domains | default([], true) %}
+{%   if _extra.portal | default('') and _extra.portal not in _managed_domains %}
+{%     set _ = _managed_domains.append(_extra.portal) %}
+{%     set _ = _gate_rules.append({'domain': _extra.portal, 'policy': 'one_factor', 'resources': ['^/access_granted/?$']}) %}
 {%   endif %}
 {% endfor %}
 access_control:

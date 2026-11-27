@@ -1194,6 +1194,7 @@ func EnsureCertsBeforeApply() (*Map, error) {
 			}
 		}
 	}
+	actions = append(actions, signInPortalCertsBeforeApply()...)
 	return newMap("ok", true, "actions", actions), nil
 }
 

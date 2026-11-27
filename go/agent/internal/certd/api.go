@@ -383,6 +383,14 @@ func (d *Daemon) certificateUsers() (map[string]bool, map[string]bool, bool) {
 				}
 			}
 		}
+		// The portals of the extra Authelia sign-in domains.
+		for _, extra := range pyx.List(settings["authelia_extra_domains"]) {
+			if entry, ok := extra.(map[string]any); ok && yamlTruthy(entry["portal"]) {
+				if n, err := normalizeDNSName(fmt.Sprint(entry["portal"]), false); err == nil {
+					used[n] = true
+				}
+			}
+		}
 	}
 	if isDir(d.Opts.DeliveryDir) {
 		for _, rp := range globSorted(filepath.Join(d.Opts.DeliveryDir, "*.json")) {

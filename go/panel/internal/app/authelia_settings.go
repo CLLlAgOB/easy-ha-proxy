@@ -484,7 +484,55 @@ func exactKeys(p *Map, keys ...string) bool {
 	return true
 }
 
+// signInFlash shows a sign-in domain action's outcome: the message, then each
+// note as a message of its own, so every sentence is translated whole.
+func signInFlash(c *Ctx, ok bool, msg string, notes []string) {
+	cat := "danger"
+	if ok {
+		cat = "success"
+		if msg == signInMsgNoRestart {
+			cat = "warning"
+		}
+	}
+	c.Flash(msg, cat)
+	for _, n := range notes {
+		c.Flash(n, "warning")
+	}
+}
+
+func (a *App) registerSignInDomains() {
+	back := func(c *Ctx) error {
+		return c.Redirect(c.URLFor("authelia_settings.edit_settings")+"#sign-in-domains", 303)
+	}
+	a.Handle("authelia_settings.add_sign_in_domain", func(c *Ctx) error {
+		req := signInRequest{Domain: c.FormStrip("domain"), Prefix: c.FormStrip("prefix"),
+			CertificateSource: c.FormStrip("certificate_source"), DNSProfile: c.FormStrip("dns_profile")}
+		ok, msg, notes := AddSignInDomain(c.op(), req)
+		c.RecordRequest("authelia_sign_in_domain.add", AuditEntry{ObjectType: "authelia", ObjectID: strings.ToLower(req.Domain),
+			Result: recordResult(ok), Detail: detailIfFailed(ok, msg)})
+		signInFlash(c, ok, msg, notes)
+		return back(c)
+	})
+	a.Handle("authelia_settings.remove_sign_in_domain", func(c *Ctx) error {
+		domain := c.FormStrip("domain")
+		ok, msg, notes := RemoveSignInDomain(c.op(), domain)
+		c.RecordRequest("authelia_sign_in_domain.remove", AuditEntry{ObjectType: "authelia", ObjectID: strings.ToLower(domain),
+			Result: recordResult(ok), Detail: detailIfFailed(ok, msg)})
+		signInFlash(c, ok, msg, notes)
+		return back(c)
+	})
+	a.Handle("authelia_settings.issue_sign_in_certificate", func(c *Ctx) error {
+		domain := c.FormStrip("domain")
+		ok, msg := IssueSignInPortalCertificate(domain)
+		c.RecordRequest("authelia_sign_in_domain.certificate", AuditEntry{ObjectType: "authelia", ObjectID: strings.ToLower(domain),
+			Result: recordResult(ok), Detail: detailIfFailed(ok, msg)})
+		signInFlash(c, ok, msg, nil)
+		return back(c)
+	})
+}
+
 func (a *App) registerAutheliaSettings() {
+	a.registerSignInDomains()
 	a.Handle("authelia_settings.get_mail_configuration", func(c *Ctx) error {
 		res, err := loadMailSettings()
 		if err != nil {
@@ -594,7 +642,8 @@ func (a *App) registerAutheliaSettings() {
 				form.Set(k, pyyaml.NewMap())
 			}
 		}
-		vars := map[string]any{"msg": nil, "msg_category": "info", "settings_load_error": loadErr, "form": form}
+		vars := map[string]any{"msg": nil, "msg_category": "info", "settings_load_error": loadErr, "form": form,
+			"sign_in": SignInDomainsView()}
 		form.Each(func(k, v any) { vars[pyStr(k)] = v })
 		return c.Render("authelia_settings.html", vars)
 	})

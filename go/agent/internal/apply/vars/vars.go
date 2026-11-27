@@ -212,7 +212,7 @@ func Load(opts Options) (*Set, error) {
 func (s *Set) preTasks(opts Options) {
 	for _, f := range []struct{ name, expr string }{
 		{"haproxy_admin_proxy_secret", "{{ haproxy_admin_proxy_secret | default(authelia_session_secret | hash('sha256'), true) }}"},
-		{"certbot_domains", "{{ (sites | map(attribute='domain') | list) + [ admin_domain ] + ( [ aut_domain ] if authelia_enabled | default(false) | bool else [] ) }}"},
+		{"certbot_domains", "{{ (sites | map(attribute='domain') | list) + [ admin_domain ] + ( [ aut_domain ] if authelia_enabled | default(false) | bool else [] ) + ( (authelia_extra_domains | default([], true)) | map(attribute='portal') | select | list if authelia_enabled | default(false) | bool else [] ) }}"},
 	} {
 		if v, err := s.Template(f.expr); err == nil {
 			s.SetFact(f.name, v)

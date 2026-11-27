@@ -324,6 +324,14 @@ func CommandMigrateDomain(ctx *Context, args MigrateDomainArgs) error {
 	if oldDomain == newDomain && !args.PromoteProduction {
 		return installerErrorf("The new root domain is identical to the current one.")
 	}
+	// The extra Authelia sign-in domains stay as they are (none lies under
+	// the root domain), but the root becomes a cookie domain too, and
+	// Authelia refuses two cookie domains where one covers the other.
+	for _, extra := range AutheliaExtraDomainNames(current["vars.yml"]) {
+		if domainsOverlap(extra, newDomain) {
+			return installerErrorf("The new root domain overlaps the extra Authelia sign-in domain %s. Remove that sign-in domain on the Authelia settings page first.", extra)
+		}
+	}
 
 	var changes []DomainChange
 	migrated := map[string]*pyyaml.Map{}

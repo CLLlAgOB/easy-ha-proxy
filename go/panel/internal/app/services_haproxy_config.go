@@ -1482,11 +1482,11 @@ func UpdateYAMLFile(op *Op, kind, content string) (bool, string) {
 
 func pyStrftimeNow() string { return time.Now().Format("20060102150405") }
 
-func replaceYAMLSource(kind, path, content string) (bool, string) {
+func replaceYAMLSource(kind, path, content string, allow ...string) (bool, string) {
 	if len(content) > 2*1024*1024 {
 		return false, "YAML file exceeds the 2 MB size limit"
 	}
-	if msg, rootErr := validateYAMLContent(kind, path, content); rootErr {
+	if msg, rootErr := validateYAMLContent(kind, path, content, allow...); rootErr {
 		return false, msg
 	} else if msg != "" {
 		return false, "YAML validation error: " + msg
@@ -1514,7 +1514,7 @@ func replaceYAMLSource(kind, path, content string) (bool, string) {
 
 // validateYAMLContent returns the validation message, and true when the
 // message is the bare "root must be a mapping" answer (not wrapped).
-func validateYAMLContent(kind, path, content string) (string, bool) {
+func validateYAMLContent(kind, path, content string, allow ...string) (string, bool) {
 	v, err := pyyaml.Load([]byte(content))
 	if err != nil {
 		return pyYAMLErrorText(err), false
@@ -1534,7 +1534,7 @@ func validateYAMLContent(kind, path, content string) (string, bool) {
 		if err != nil {
 			return pyYAMLErrorText(err), false
 		}
-		if err := ValidateProtectedVarsUnchanged(existing, data); err != nil {
+		if err := ValidateProtectedVarsUnchanged(existing, data, allow...); err != nil {
 			return err.Error(), false
 		}
 	}

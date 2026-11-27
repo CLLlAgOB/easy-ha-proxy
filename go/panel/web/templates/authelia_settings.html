@@ -231,6 +231,147 @@
     {% endif %}
   </div>
 
+  <section class="card" id="sign-in-domains" aria-labelledby="sign-in-domains-title">
+    <div class="card-header">
+      <div>
+        <h2 id="sign-in-domains-title">Extra sign-in domains</h2>
+        <p class="table-meta">
+          Authelia can protect only sites under its sign-in domains: a browser sends its session cookie to one registrable domain.
+          Add a domain here to protect sites under it too. Each sign-in domain has a portal of its own, where its sites send visitors to sign in.
+        </p>
+        <p class="table-meta">
+          Users, passwords and second factors are the same on every domain, but a sign-in on one domain does not sign the user in on another.
+        </p>
+      </div>
+    </div>
+
+    {% if not sign_in.enabled %}
+    <p class="form-hint">Authelia is turned off on this gateway, so there is nothing to sign in to.</p>
+    {% elif not sign_in.available %}
+    <p class="form-hint">This gateway has no Authelia portal (aut_domain), so no sign-in domain can be added.</p>
+    {% else %}
+    <p class="form-hint">
+      Main sign-in domain portal: <code>{{ sign_in.aut_domain }}</code>{% if sign_in.aut_addresses %} (<code>{{ sign_in.aut_addresses }}</code>){% endif %}.
+    </p>
+    {% if not sign_in.cookies_known %}
+    <div class="u-m-16px alert alert-error">Authelia's session cookies could not be read, so whether each domain is in place is not known.</div>
+    {% endif %}
+
+    {% if sign_in['items'] %}
+    <div class="table-container u-mt-2">
+    <table class="table">
+      <thead><tr><th>Domain</th><th>Portal</th><th>DNS record</th><th>Certificate</th><th>In Authelia</th><th class="text-right">Actions</th></tr></thead>
+      <tbody>
+      {% for item in sign_in['items'] %}
+      <tr>
+        <td><code>{{ item.domain }}</code></td>
+        <td><code>{{ item.portal }}</code></td>
+        <td>
+          {% if item.dns_state == 'ok' %}
+            <span class="badge">Points to this gateway</span>
+          {% elif item.dns_state == 'resolves' %}
+            <span class="badge">Resolves</span> <code>{{ item.addresses }}</code>
+          {% elif item.dns_state == 'elsewhere' %}
+            <span class="badge warn">Points elsewhere</span> <code>{{ item.addresses }}</code>
+          {% else %}
+            <span class="badge warn">Not found</span>
+          {% endif %}
+          <div class="form-hint">Create an A record for the portal with the same address as the main portal.</div>
+        </td>
+        <td>
+          {% if item.cert_state == 'ok' or item.cert_state == 'haproxy_only' %}
+            <span class="badge">Valid</span>
+          {% elif item.cert_state == 'missing' %}
+            <span class="badge warn">Missing</span>
+          {% elif item.cert_state == 'expired' %}
+            <span class="badge danger">Expired</span>
+          {% else %}
+            <span class="badge warn" data-i18n-skip translate="no">{{ item.cert_short }}</span>
+          {% endif %}
+          <div class="form-hint" data-i18n-skip translate="no">{{ item.certificate_source }}{% if item.dns_profile %} · DNS-01 {{ item.dns_profile }}{% endif %}</div>
+        </td>
+        <td>
+          {% if item.in_authelia %}
+            <span class="badge">Yes</span>
+          {% elif sign_in.cookies_known %}
+            <span class="badge warn">No</span>
+          {% else %}
+            —
+          {% endif %}
+        </td>
+        <td class="text-right">
+          {% if sign_in.cookies_known and not item.in_authelia %}
+          <form method="post" action="{{ url_for('authelia_settings.add_sign_in_domain') }}" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="domain" value="{{ item.domain }}">
+            <input type="hidden" name="prefix" value="{{ item.prefix }}">
+            <button type="submit" class="btn btn-sm">Write to Authelia</button>
+          </form>
+          {% endif %}
+          {% if item.certificate_source != 'external' %}
+          <form method="post" action="{{ url_for('authelia_settings.issue_sign_in_certificate') }}" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="domain" value="{{ item.domain }}">
+            <button type="submit" class="btn btn-secondary btn-sm">Issue certificate</button>
+          </form>
+          {% endif %}
+          <form method="post" action="{{ url_for('authelia_settings.remove_sign_in_domain') }}" class="inline"
+            data-confirm="Remove this sign-in domain? Its sites can no longer sign in.">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="domain" value="{{ item.domain }}">
+            <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="form-hint">No extra sign-in domains yet.</p>
+    {% endif %}
+
+    <form method="post" action="{{ url_for('authelia_settings.add_sign_in_domain') }}" class="u-mt-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="form-section-title">Add a sign-in domain</div>
+      <div class="grid">
+        <div class="form-group">
+          <label class="form-label" for="sign_in_domain">Domain</label>
+          <input type="text" class="form-input" id="sign_in_domain" name="domain" placeholder="example.org" required>
+          <div class="form-hint">The registrable domain of the sites to protect: every name under it signs in through its portal. For example: <code>example.org</code></div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="sign_in_prefix">Portal name prefix</label>
+          <input type="text" class="form-input" id="sign_in_prefix" name="prefix" value="aut">
+          <div class="form-hint">The portal is this name under the domain, and its DNS record is yours to create. For example: <code>aut.example.org</code></div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="sign_in_source">Portal certificate</label>
+          <select class="form-input" id="sign_in_source" name="certificate_source">
+            <option value="">Gateway default</option>
+            <option value="letsencrypt">Let's Encrypt</option>
+            <option value="internal">Internal CA</option>
+            <option value="external">External certificate</option>
+          </select>
+        </div>
+        {% if sign_in.dns_profiles %}
+        <div class="form-group">
+          <label class="form-label" for="sign_in_dns_profile">DNS profile for Let's Encrypt</label>
+          <select class="form-input" id="sign_in_dns_profile" name="dns_profile">
+            <option value="">None: HTTP-01 through port 80</option>
+            {% for p in sign_in.dns_profiles %}
+            <option value="{{ p.name }}" data-i18n-skip translate="no">{{ p.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        {% endif %}
+      </div>
+      <p class="form-hint">Adding a domain restarts Authelia for a few seconds. Then apply the HAProxy configuration to route the portal.</p>
+      <button type="submit" class="btn">Add sign-in domain</button>
+    </form>
+    {% endif %}
+  </section>
+
   <section class="card" aria-labelledby="authelia-mail-moved-title">
     <div class="card-header">
       <div>

@@ -106,6 +106,7 @@
               (sites | map(attribute='domain') | list)
               + [ admin_domain ]
               + ( [ aut_domain ] if authelia_enabled | default(false) | bool else [] )
+              + ( (authelia_extra_domains | default([], true)) | map(attribute='portal') | select | list if authelia_enabled | default(false) | bool else [] )
           }}
       tags: always
 

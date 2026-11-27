@@ -78,6 +78,22 @@
 {# HAProxy Admin is a privileged control plane. It always inherits the global
    Authelia state; a runtime vars.yml value must not downgrade authentication. #}
 {% set admin_authelia_enabled = authelia_enabled %}
+{# The portals of the extra Authelia sign-in domains (authelia_extra_domains).
+   A browser keeps a cookie to its own registrable domain, so a site under
+   another domain signs in through a portal under that domain; all of them
+   are the same Authelia. They get an ACL of their own: host_authelia stays
+   the main portal alone, the protected service domain that the panel and
+   controld refuse to see changed outside migrate-domain. Every rule that
+   names host_authelia is repeated for host_authelia_extra. #}
+{% set extra_portals = [] %}
+{% if aut_domain is defined and authelia_enabled %}
+{% for _extra in authelia_extra_domains | default([], true) %}
+{% if _extra.portal | default('') and _extra.portal != aut_domain and _extra.portal not in extra_portals %}
+{% set _ = extra_portals.append(_extra.portal) %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% set portal_acls = ['host_authelia'] + (['host_authelia_extra'] if extra_portals else []) %}
 {# passthrough sites #}
 {% set passthru_sites = sites | selectattr('tcp_passthrough','defined') | selectattr('tcp_passthrough') | list %}
 {% set has_passthru = (passthru_sites | length > 0) %}
@@ -451,6 +467,9 @@ frontend fe_https
 {% if aut_domain is defined and authelia_enabled %}
 {% set _ = sni_domains.append(aut_domain) %}
 {% endif %}
+{% for _portal in extra_portals %}
+{% set _ = sni_domains.append(_portal) %}
+{% endfor %}
 
     acl valid_sni ssl_fc_sni -i {{ sni_domains | unique | join(' ') }}
 
@@ -485,12 +504,16 @@ frontend fe_https
 
 {% if aut_domain is defined and authelia_enabled %}
     acl host_authelia hdr(host) -i {{ aut_domain }}
+{% if extra_portals %}
+    acl host_authelia_extra hdr(host) -i {{ extra_portals | join(' ') }}
+{% endif %}
     acl path_access_granted path -i /access_granted
 {% endif %}
 
 {% set all_hosts = [] %}
 {% if admin_domain is defined %}{% set _ = all_hosts.append(admin_domain) %}{% endif %}
 {% if aut_domain is defined and authelia_enabled %}{% set _ = all_hosts.append(aut_domain) %}{% endif %}
+{% for _portal in extra_portals %}{% set _ = all_hosts.append(_portal) %}{% endfor %}
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
 {% set _ = all_hosts.append(s.domain) %}
@@ -1052,12 +1075,14 @@ frontend fe_https
 {% endif %}
 
 {% if aut_domain is defined %}
-    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD {{ authelia_forward_req_headers }} remote-user,remote-groups,remote-name,remote-email - if host_authelia path_access_granted
-    http-request deny if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
-    http-request redirect location %[var(txn.auth_response_location)] if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
-    http-request deny status 503 if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool }
-    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if host_authelia path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
-    http-request set-var(txn.log_auth_user) var(req.auth_response_header.remote_user),bytes(0,256),url_enc if host_authelia path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
+{% for _pacl in portal_acls %}
+    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD {{ authelia_forward_req_headers }} remote-user,remote-groups,remote-name,remote-email - if {{ _pacl }} path_access_granted
+    http-request deny if {{ _pacl }} path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
+    http-request redirect location %[var(txn.auth_response_location)] if {{ _pacl }} path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
+    http-request deny status 503 if {{ _pacl }} path_access_granted !{ var(txn.auth_response_successful) -m bool }
+    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if {{ _pacl }} path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
+    http-request set-var(txn.log_auth_user) var(req.auth_response_header.remote_user),bytes(0,256),url_enc if {{ _pacl }} path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
+{% endfor %}
 {% endif %}
 {% endif %}
 
@@ -1109,8 +1134,10 @@ frontend fe_https
 {% endif %}
 
 {% if aut_domain is defined and authelia_enabled %}
-    use_backend be_access_granted if host_authelia path_access_granted
-    use_backend authelia_backend if authelia_up host_authelia !path_access_granted
+{% for _pacl in portal_acls %}
+    use_backend be_access_granted if {{ _pacl }} path_access_granted
+    use_backend authelia_backend if authelia_up {{ _pacl }} !path_access_granted
+{% endfor %}
 {% endif %}
 {% if admin_domain is defined %}
     # HAProxy's statistics page, on the admin host only and after its
@@ -1212,6 +1239,9 @@ frontend fe_http80
 {% endfor %}
 {% if aut_domain is defined and authelia_enabled %}
     acl host_authelia hdr(host) -i {{ aut_domain }}
+{% if extra_portals %}
+    acl host_authelia_extra hdr(host) -i {{ extra_portals | join(' ') }}
+{% endif %}
 {% endif %}
 
 {% for site in sites %}
@@ -1222,7 +1252,9 @@ frontend fe_http80
 {% endif %}
 {% endfor %}
 {% if aut_domain is defined and authelia_enabled %}
-    http-request redirect scheme https code 301 if host_authelia !acme_challenge_http
+{% for _pacl in portal_acls %}
+    http-request redirect scheme https code 301 if {{ _pacl }} !acme_challenge_http
+{% endfor %}
 {% endif %}
 
     http-request return status 404 content-type text/plain lf-string "Not found" if !acme_challenge_http

@@ -113,22 +113,23 @@ var (
 	// templates (haproxy-state-dump.sh, update-admin-rt.sh), so carrying it
 	// would hand a compromised container command execution as root.
 	RuntimeHAProxyVarKeys = map[string]bool{
-		"admin_allowed_ips":    true,
-		"admin_ips_enabled":    true,
-		"admin_password":       true,
-		"enable_geoip":         true,
-		"enable_http80":        true,
-		"export_prometheus":    true,
-		"geoip_country_codes":  true,
-		"geoip_mode":           true,
-		"haproxy_nbthread":     true,
-		"haproxy_nbthread_max": true,
-		"localpeer":            true,
-		"peers_bind":           true,
-		"peers_enabled":        true,
-		"peers_name":           true,
-		"prometheus_port":      true,
-		"site_defaults":        true,
+		"admin_allowed_ips":      true,
+		"authelia_extra_domains": true,
+		"admin_ips_enabled":      true,
+		"admin_password":         true,
+		"enable_geoip":           true,
+		"enable_http80":          true,
+		"export_prometheus":      true,
+		"geoip_country_codes":    true,
+		"geoip_mode":             true,
+		"haproxy_nbthread":       true,
+		"haproxy_nbthread_max":   true,
+		"localpeer":              true,
+		"peers_bind":             true,
+		"peers_enabled":          true,
+		"peers_name":             true,
+		"prometheus_port":        true,
+		"site_defaults":          true,
 	}
 
 	ConfigurationFiles = []string{"inventory.ini", "vars.yml", "secrets.yml"}
@@ -731,6 +732,9 @@ func loadRuntimeHAProxyDocuments(runtimeDir string) (*pyyaml.Map, *pyyaml.Map, *
 		if _, isMap := sd.(*pyyaml.Map); !isMap {
 			return nil, nil, nil, false, installerErrorf("Runtime vars.yml site_defaults must be a mapping.")
 		}
+	}
+	if err := ValidateAutheliaExtraDomains(rv.Value("authelia_extra_domains"), "Runtime vars.yml"); err != nil {
+		return nil, nil, nil, false, err
 	}
 
 	runtimeGeoCountries := map[string]bool{}
