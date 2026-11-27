@@ -478,24 +478,23 @@ func deepUpdate(dst, src *pyyaml.Map) {
 }
 
 var sensitiveKeys = map[string]bool{"secret": true, "password": true, "token": true, "api_key": true, "private_key": true,
-	"encryption_key": true, "jwt_secret": true, "client_secret": true}
+	"encryption_key": true, "jwt_secret": true, "client_secret": true, "hmac_secret": true, "issuer_private_key": true}
 
-func maskSensitiveFields(node any) {
+func maskSensitiveFields(node any, jwks bool) {
 	switch x := node.(type) {
 	case *pyyaml.Map:
 		for _, k := range x.Keys() {
 			v := x.Value(k)
-			_, isMap := v.(*pyyaml.Map)
-			_, isList := v.([]any)
-			if sensitiveKeys[strings.ToLower(pyStr(k))] && !isMap && !isList {
+			name := strings.ToLower(pyStr(k))
+			if sensitiveKeys[name] || jwks && name == "key" {
 				x.Set(k, "*****")
 			} else {
-				maskSensitiveFields(v)
+				maskSensitiveFields(v, name == "jwks")
 			}
 		}
 	case []any:
 		for _, v := range x {
-			maskSensitiveFields(v)
+			maskSensitiveFields(v, jwks)
 		}
 	}
 }
@@ -998,7 +997,7 @@ func (c *Configd) handleConfigView() (map[string]any, error) {
 	if ac, ok := data.Value("access_control").(*pyyaml.Map); ok {
 		ac.Delete("rules")
 	}
-	maskSensitiveFields(data)
+	maskSensitiveFields(data, false)
 	return map[string]any{"ok": true, "config": data}, nil
 }
 
@@ -1021,6 +1020,17 @@ func (c *Configd) handleSettingsUpdate(req *pyyaml.Map) (map[string]any, error) 
 	}
 	if err := rejectUnsafeValues(cfg, false); err != nil {
 		return map[string]any{"ok": false, "error": errText(err)}, nil
+	}
+	if section, present := cfg.Get("log"); present {
+		settings, ok := section.(*pyyaml.Map)
+		if !ok {
+			return map[string]any{"ok": false, "error": "log settings must be a mapping"}, nil
+		}
+		for _, key := range settings.Keys() {
+			if strings.EqualFold(strings.ReplaceAll(pyStr(key), "-", "_"), "file_path") {
+				return map[string]any{"ok": false, "error": "log.file_path is managed by the host"}, nil
+			}
+		}
 	}
 	if session, present := cfg.Get("session"); present {
 		settings, ok := session.(*pyyaml.Map)

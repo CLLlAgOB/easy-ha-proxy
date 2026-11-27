@@ -154,8 +154,8 @@ func formatBytes(value int64) string {
 	return fmt.Sprintf("%d B", value)
 }
 
-func requireRoot() error {
-	if os.Geteuid() != 0 && os.Getenv("EASY_HA_PROXY_ALLOW_NON_ROOT") != "1" {
+var requireRoot = func() error {
+	if os.Geteuid() != 0 {
 		return backupErrorf("Run as root (sudo).")
 	}
 	return nil

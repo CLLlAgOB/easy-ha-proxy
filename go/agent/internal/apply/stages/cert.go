@@ -221,6 +221,13 @@ done
 echo "$ok"
 `
 
+func dnsCheckScript(names, resolvers []string) string {
+	return strings.NewReplacer(
+		"{{ names | map('quote') | join(' ') }}", quoteAll(names),
+		"{{ acme_resolvers | map('quote') | join(' ') }}", quoteAll(resolvers),
+	).Replace(dnsCheck)
+}
+
 func quoteAll(list []string) string {
 	out := make([]string, len(list))
 	for i, s := range list {
@@ -410,8 +417,7 @@ func certRenew(b *Builder) []engine.Step {
 			loop := &engine.Multi{Desc: "dig per target"}
 			c.checks = nil
 			for _, item := range c.plannedItems {
-				script := strings.Replace(dnsCheck, "{{ names | map('quote') | join(' ') }}", quoteAll(item.names), 1)
-				script = strings.Replace(script, "{{ acme_resolvers | map('quote') | join(' ') }}", quoteAll(resolvers), 1)
+				script := dnsCheckScript(item.names, resolvers)
 				cmd := &engine.Command{Argv: []string{"/bin/bash", "-c", script}}
 				c.checks = append(c.checks, cmd)
 				loop.Items = append(loop.Items, cmd)

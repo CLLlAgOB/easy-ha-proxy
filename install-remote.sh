@@ -55,6 +55,7 @@ Connection options:
       --apply              With --sync-source, immediately apply synchronized source
       --restore-full FILE  Restore an encrypted full backup on the target
       --restore-mode MODE  auto, fresh or overlay (default: auto)
+      --allow-legacy-v1   Accept an unauthenticated v1 backup from a trusted source
       --source-root DIR    Local project root used for staging/sync; with a
                            clean install, test these exact local sources
       --source-channel CH  github or local
@@ -299,6 +300,7 @@ prepared_config_dir=""
 source_root=""
 restore_archive=""
 restore_mode="auto"
+allow_legacy_v1=false
 local_snapshot_root="${EASY_HA_PROXY_BACKUP_DIR:-${HOME:-${PWD}}/easy-ha-proxy-backups}"
 
 while [[ "$#" -gt 0 ]]; do
@@ -377,6 +379,10 @@ while [[ "$#" -gt 0 ]]; do
       [[ "$#" -ge 2 ]] || die "Missing restore mode."
       restore_mode="$2"
       shift 2
+      ;;
+    --allow-legacy-v1)
+      allow_legacy_v1=true
+      shift
       ;;
     --source-root)
       [[ "$#" -ge 2 ]] || die "Missing local project root."
@@ -802,7 +808,7 @@ if [[ -r "${local_installer_file}" ]]; then
   cp -- "${local_installer_file}" "${temporary_installer}"
 else
   printf '[%s] Downloading local installer\n' "${product}"
-  curl -fsSL "${local_installer_url}" -o "${temporary_installer}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 180 "${local_installer_url}" -o "${temporary_installer}"
 fi
 chmod 0700 "${temporary_installer}"
 if [[ -r "${helper_file}" ]]; then
@@ -810,7 +816,7 @@ if [[ -r "${helper_file}" ]]; then
   cp -- "${helper_file}" "${temporary_helper}"
 else
   printf '[%s] Downloading maintenance helper\n' "${product}"
-  curl -fsSL "${helper_url}" -o "${temporary_helper}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 180 "${helper_url}" -o "${temporary_helper}"
 fi
 chmod 0700 "${temporary_helper}"
 
@@ -1148,6 +1154,9 @@ EOF
   recovery_command+="EASY_HA_PROXY_SOURCE_DIR=\${recovery_source} "
   recovery_command+="bash \${recovery_source}/installer/easy-ha-proxy "
   recovery_command+="restore-full ${remote_restore_archive} --mode ${restore_mode} --apply"
+  if [[ "${allow_legacy_v1}" == true ]]; then
+    recovery_command+=" --allow-legacy-v1"
+  fi
   remote_command="if [ \"\$(id -u)\" -eq 0 ]; then sh -c '${recovery_command}'; "
   remote_command+="elif command -v sudo >/dev/null 2>&1; then sudo sh -c '${recovery_command}'; "
   remote_command+="else echo 'easy-ha-proxy: root or sudo is required' >&2; exit 1; fi"

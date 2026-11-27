@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/hostfile"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
@@ -67,25 +68,32 @@ func (d *Daemon) reportAlert(rule, subject, summary, detail string) {
 
 // loadYAML is _load_yaml: {} for a missing or unreadable file.
 func loadYAML(path string) map[string]any {
-	raw, err := os.ReadFile(path)
+	data, err := readYAML(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("Failed to load YAML %s: %v", path, err)
 		}
 		return map[string]any{}
 	}
+	return data
+}
+
+func readYAML(path string) (map[string]any, error) {
+	raw, err := hostfile.ReadRegular(path, 16<<20)
+	if err != nil {
+		return nil, err
+	}
 	var data any
 	if err := yaml.Unmarshal(raw, &data); err != nil {
-		log.Printf("Failed to load YAML %s: %v", path, err)
-		return map[string]any{}
+		return nil, err
 	}
 	switch v := data.(type) {
 	case nil:
-		return map[string]any{}
+		return map[string]any{}, nil
 	case map[string]any:
-		return v
+		return v, nil
 	default:
-		return map[string]any{"_": v}
+		return map[string]any{"_": v}, nil
 	}
 }
 

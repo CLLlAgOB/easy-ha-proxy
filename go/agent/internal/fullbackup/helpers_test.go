@@ -219,7 +219,7 @@ func createTestArchive(t *testing.T, root string, spec archiveSpec) (string, map
 	bundle := filepath.Join(root, "bundle.tar.gz")
 	writeTar(t, bundle, members)
 	encrypted := filepath.Join(root, "easy-ha-proxy-full-test.tar.gz.enc")
-	if err := opensslCrypt(bundle, encrypted, passphrase, false); err != nil {
+	if err := encryptBackup(bundle, encrypted, passphrase); err != nil {
 		t.Fatal(err)
 	}
 	sum, _ := sha256File(encrypted)
@@ -311,10 +311,8 @@ func installedHost(t *testing.T, root string) string {
 	t.Helper()
 	config := filepath.Join(root, "config")
 	writeText(t, filepath.Join(config, "metadata.yml"), "mode: production\n")
-	t.Setenv("EASY_HA_PROXY_ALLOW_NON_ROOT", "1")
+	swap(t, &requireRoot, func() error { return nil })
 	t.Setenv("EASY_HA_PROXY_CONFIG_DIR", config)
-	t.Setenv("EASY_HA_PROXY_TEST_PASSPHRASE", "")
-	os.Unsetenv("EASY_HA_PROXY_TEST_PASSPHRASE")
 	swap(t, &metricsSnapshot, filepath.Join(root, "no-history", "metrics.db"))
 	swap(t, &metricsDatabase, filepath.Join(root, "metrics", "metrics.db"))
 	swap(t, &DefaultBackupRoot, filepath.Join(root, "backups"))

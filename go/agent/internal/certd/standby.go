@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/hostfile"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
@@ -138,13 +139,7 @@ func (d *Daemon) writePin(stemName, slot string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	defer os.Remove(tmp)
-	if err := os.WriteFile(tmp, []byte(slot+"\n"), 0o644); err != nil {
-		return err
-	}
-	_ = os.Chmod(tmp, 0o644)
-	return os.Rename(tmp, path)
+	return hostfile.WriteAtomic(path, []byte(slot+"\n"), 0o644)
 }
 
 func (d *Daemon) clearPin(stemName string) error {
@@ -290,17 +285,12 @@ func (d *Daemon) storeStandbyCertificate(domain, slot any, pemValue []byte) (map
 	if err != nil {
 		return nil, err
 	}
+	d.standbyMu.Lock()
+	defer d.standbyMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return nil, err
-	}
-	if err := setCertPermissions(tmp); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := replaceServerPEMWithoutReload(path, data); err != nil {
 		return nil, err
 	}
 	log.Printf("Stored standby certificate %s for %s", checkedSlot, checkedDomain)

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/hostfile"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
@@ -190,17 +191,17 @@ func (d *Daemon) geoipSetSchedule(schedule any) map[string]any {
 	if !allowed {
 		return map[string]any{"ok": false, "error": "schedule must be one of: " + strings.Join(geoipAllowedSchedules, ", ")}
 	}
+	if !d.geoipOp.TryLock() {
+		return map[string]any{"ok": false, "error": "another GeoIP operation is already running", "conflict": true}
+	}
+	defer d.geoipOp.Unlock()
 	content := "# Managed by the easy-ha-proxy web UI.\n[Timer]\nOnCalendar=\nOnCalendar=" + value + "\n"
 	dropin := d.Opts.GeoIPTimerDropin
 	if err := func() error {
-		if err := os.MkdirAll(filepath.Dir(dropin), 0o777); err != nil {
+		if err := os.MkdirAll(filepath.Dir(dropin), 0o755); err != nil {
 			return err
 		}
-		tmp := dropin + ".tmp"
-		if err := os.WriteFile(tmp, []byte(content), 0o666); err != nil {
-			return err
-		}
-		return os.Rename(tmp, dropin)
+		return hostfile.WriteAtomic(dropin, []byte(content), 0o644)
 	}(); err != nil {
 		return map[string]any{"ok": false, "error": "cannot write timer override: " + pyErr(err)}
 	}

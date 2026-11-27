@@ -11,6 +11,8 @@ import (
 
 	"golang.org/x/sys/unix"
 	"modernc.org/sqlite"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/hostfile"
 )
 
 type onlineBackup interface {
@@ -121,7 +123,7 @@ func discardMetricsSnapshot(snapshot string) {
 // old database; left in place SQLite would replay it into the restored one.
 var installRestoredMetrics = func() (bool, error) {
 	snapshot, database := metricsSnapshot, metricsDatabase
-	sourceDir, err := openRestoreDirectory(filepath.Dir(snapshot), 0)
+	sourceDir, err := hostfile.OpenDirectory(filepath.Dir(snapshot), 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -163,7 +165,7 @@ var installRestoredMetrics = func() (bool, error) {
 			_, _ = run([]string{"systemctl", "start", metricsUnit}, runOptions{})
 		}
 	}()
-	destDir, err := openRestoreDirectory(filepath.Dir(database), 0o755)
+	destDir, err := hostfile.OpenDirectory(filepath.Dir(database), 0o755)
 	if err != nil {
 		return false, err
 	}

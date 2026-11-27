@@ -9,8 +9,8 @@ import (
 
 const usageText = `usage: easy-ha-proxy-agent full-backup backup [--output-dir DIR] [--include-ssh] [--no-quiesce] [--passphrase-stdin]
        easy-ha-proxy-agent full-backup restore ARCHIVE [--mode auto|fresh|overlay] [--scope full|config]
-           [--restore-ssh] [--skip-ssh] [--apply] [--replace-managed] [--passphrase-stdin] [--yes]
-       easy-ha-proxy-agent full-backup inspect ARCHIVE [--passphrase-stdin]`
+           [--restore-ssh] [--skip-ssh] [--apply] [--replace-managed] [--passphrase-stdin] [--allow-legacy-v1] [--yes]
+       easy-ha-proxy-agent full-backup inspect ARCHIVE [--passphrase-stdin] [--allow-legacy-v1]`
 
 // parsed is the command line: flags (boolean or with a value) in any order
 // around the positional arguments, as argparse takes them.
@@ -98,7 +98,7 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 	case "restore":
 		var p *parsed
 		p, err = parseArgs(args[1:], map[string][]string{"restore-ssh": none, "skip-ssh": none, "apply": none,
-			"replace-managed": none, "passphrase-stdin": none, "yes": none},
+			"replace-managed": none, "passphrase-stdin": none, "allow-legacy-v1": none, "yes": none},
 			map[string][]string{"mode": {"auto", "fresh", "overlay"}, "scope": {"full", "config"}})
 		if err != nil {
 			return bad(err.Error())
@@ -113,11 +113,11 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 			err = restoreBackup(restoreOptions{archive: p.positional[0], mode: p.value("mode", "auto"),
 				scope: p.value("scope", "full"), restoreSSH: p.set("restore-ssh"), skipSSH: p.set("skip-ssh"),
 				apply: p.set("apply"), replaceManaged: p.set("replace-managed"),
-				passphraseStdin: p.set("passphrase-stdin"), yes: p.set("yes")})
+				passphraseStdin: p.set("passphrase-stdin"), allowLegacy: p.set("allow-legacy-v1"), yes: p.set("yes")})
 		}
 	case "inspect":
 		var p *parsed
-		p, err = parseArgs(args[1:], map[string][]string{"passphrase-stdin": none}, nil)
+		p, err = parseArgs(args[1:], map[string][]string{"passphrase-stdin": none, "allow-legacy-v1": none}, nil)
 		if err != nil {
 			return bad(err.Error())
 		}
@@ -128,7 +128,7 @@ func RunCLI(args []string, stdout, stderr io.Writer) int {
 			return bad("unrecognized arguments: " + strings.Join(p.positional[1:], " "))
 		}
 		if err = loadLimits(); err == nil {
-			_, err = inspectBackup(p.positional[0], p.set("passphrase-stdin"))
+			_, err = inspectBackup(p.positional[0], p.set("passphrase-stdin"), p.set("allow-legacy-v1"))
 		}
 	default:
 		return bad(fmt.Sprintf("argument command: invalid choice: '%s' (choose from 'backup', 'restore', 'inspect')", args[0]))

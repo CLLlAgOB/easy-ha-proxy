@@ -13,7 +13,7 @@ func TestEncryptionRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	source, encrypted, restored := filepath.Join(root, "source.bin"), filepath.Join(root, "backup.enc"), filepath.Join(root, "restored.bin")
 	writeText(t, source, strings.Repeat("easy-ha-proxy backup test\n", 32))
-	if err := opensslCrypt(source, encrypted, passphrase, false); err != nil {
+	if err := encryptBackup(source, encrypted, passphrase); err != nil {
 		t.Fatal(err)
 	}
 	if readText(t, encrypted)[:4] != encMagic || readText(t, encrypted) == readText(t, source) {
@@ -22,21 +22,21 @@ func TestEncryptionRoundTrip(t *testing.T) {
 	if fi, _ := os.Stat(encrypted); fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v", fi.Mode())
 	}
-	if err := opensslCrypt(encrypted, restored, passphrase, true); err != nil {
+	if err := decryptBackup(encrypted, restored, passphrase, false); err != nil {
 		t.Fatal(err)
 	}
 	if readText(t, restored) != readText(t, source) {
 		t.Fatal("round trip changed the data")
 	}
 	// A wrong passphrase, and a damaged file, are told before OpenSSL runs.
-	if err := opensslCrypt(encrypted, restored, "another passphrase", true); !isWrongPassphrase(err) {
+	if err := decryptBackup(encrypted, restored, "another passphrase", false); !isWrongPassphrase(err) {
 		t.Fatalf("wrong passphrase: %v", err)
 	}
 	raw := []byte(readText(t, encrypted))
 	raw[len(raw)-1] ^= 0xff
 	damaged := filepath.Join(root, "damaged.enc")
 	_ = os.WriteFile(damaged, raw, 0o600)
-	if err := opensslCrypt(damaged, restored, passphrase, true); !isWrongPassphrase(err) {
+	if err := decryptBackup(damaged, restored, passphrase, false); !isWrongPassphrase(err) {
 		t.Fatalf("damaged: %v", err)
 	}
 	if entries, _ := os.ReadDir(root); len(entries) != 4 {
@@ -52,7 +52,10 @@ func TestLegacyV1ArchivesStayReadable(t *testing.T) {
 	if err := runOpenSSLEnc(source, legacy, passphrase, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := opensslCrypt(legacy, restored, passphrase, true); err != nil || readText(t, restored) != "a v1 archive\n" {
+	if err := decryptBackup(legacy, restored, passphrase, false); err == nil || !strings.Contains(err.Error(), "--allow-legacy-v1") {
+		t.Fatalf("legacy archive accepted without opt-in: %v", err)
+	}
+	if err := decryptBackup(legacy, restored, passphrase, true); err != nil || readText(t, restored) != "a v1 archive\n" {
 		t.Fatalf("legacy: %v", err)
 	}
 }
@@ -82,7 +85,7 @@ func TestABackupIsEncryptedWithItsManifest(t *testing.T) {
 	}
 	decrypted, extracted := filepath.Join(root, "decrypted.tar.gz"), filepath.Join(root, "extracted")
 	_ = os.Mkdir(extracted, 0o700)
-	if err := opensslCrypt(encrypted, decrypted, passphrase, true); err != nil {
+	if err := decryptBackup(encrypted, decrypted, passphrase, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := extractBundle(decrypted, extracted); err != nil {
@@ -123,7 +126,7 @@ func TestABackupIsEncryptedWithItsManifest(t *testing.T) {
 func TestABackupNeedsAnInstallation(t *testing.T) {
 	requireTools(t, "openssl", "tar")
 	root := t.TempDir()
-	t.Setenv("EASY_HA_PROXY_ALLOW_NON_ROOT", "1")
+	swap(t, &requireRoot, func() error { return nil })
 	t.Setenv("EASY_HA_PROXY_CONFIG_DIR", filepath.Join(root, "missing"))
 	if _, err := createBackup(backupOptions{outputDir: filepath.Join(root, "backups")}); err == nil ||
 		!strings.Contains(err.Error(), "installation was not found") {
@@ -136,7 +139,7 @@ func inspectWithStdin(t *testing.T, encrypted string) (map[string]any, string, e
 	withStdin(t, passphrase+"\n")
 	var manifest map[string]any
 	var err error
-	output := captureStdout(t, func() { manifest, err = inspectBackup(encrypted, true) })
+	output := captureStdout(t, func() { manifest, err = inspectBackup(encrypted, true, false) })
 	return manifest, output, err
 }
 

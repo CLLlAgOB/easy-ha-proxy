@@ -80,26 +80,15 @@ func input(prompt string) string {
 	return line
 }
 
-func testPassphrase() (string, bool) {
-	value, set := os.LookupEnv("EASY_HA_PROXY_TEST_PASSPHRASE")
-	return value, set && os.Getenv("EASY_HA_PROXY_ALLOW_NON_ROOT") == "1"
-}
-
 // passphraseIsTyped says whether a person is at a terminal typing the
 // passphrase: only then is asking again any use. A piped passphrase is the
 // same on every attempt, so a second try would only repeat the failure.
 func passphraseIsTyped(fromStdin bool) bool {
-	if fromStdin {
-		return false
-	}
-	if _, testing := testPassphrase(); testing {
-		return false
-	}
-	return term.isTTY()
+	return !fromStdin && term.isTTY()
 }
 
-// readPassphrase: one line from standard input, the test passphrase, or a
-// prompt that asks again until it gets a usable answer (Ctrl+C stops it).
+// readPassphrase reads one line from standard input or prompts until it
+// gets a usable answer (Ctrl+C stops it).
 var readPassphrase = func(confirm, fromStdin bool) (string, error) {
 	if fromStdin {
 		line, err := term.stdin.ReadString('\n')
@@ -111,9 +100,6 @@ var readPassphrase = func(confirm, fromStdin bool) (string, error) {
 			return "", backupErrorf("Use a backup passphrase of at least 12 characters.")
 		}
 		return first, nil
-	}
-	if value, testing := testPassphrase(); testing {
-		return value, nil
 	}
 	retry := passphraseIsTyped(fromStdin)
 	for {

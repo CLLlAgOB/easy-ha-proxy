@@ -5,9 +5,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"easy-ha-proxy/panel/shared/pyyaml"
@@ -466,6 +468,20 @@ func CommandMigrateDomain(ctx *Context, args MigrateDomainArgs) error {
 		return err
 	}
 	defer os.RemoveAll(previewDir)
+	previewSignals := make(chan os.Signal, 1)
+	previewDone := make(chan struct{})
+	signal.Notify(previewSignals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(previewSignals)
+	defer close(previewDone)
+	go func() {
+		select {
+		case sig := <-previewSignals:
+			_ = os.RemoveAll(previewDir)
+			signal.Stop(previewSignals)
+			_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
+		case <-previewDone:
+		}
+	}()
 	_ = os.Chmod(previewDir, 0o700)
 
 	entries, err := os.ReadDir(directory)

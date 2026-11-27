@@ -94,7 +94,7 @@ component_path() {
   temporary="$(mktemp -t "easy-ha-proxy-${safe_name}.XXXXXX")"
   temporary_components+=("${temporary}")
   printf '[%s] Downloading %s\n' "${product}" "${name}" >&2
-  curl -fsSL "${raw_base}/${name}" -o "${temporary}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 180 "${raw_base}/${name}" -o "${temporary}"
   chmod 0700 "${temporary}"
   component="${temporary}"
 }

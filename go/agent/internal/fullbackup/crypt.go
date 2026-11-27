@@ -72,7 +72,7 @@ func createPrivate(p string) (*os.File, error) {
 	return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|noFollow, 0o600)
 }
 
-func decryptBackup(source, destination, password string) error {
+func decryptBackup(source, destination, password string, allowLegacy bool) error {
 	in, err := os.OpenFile(source, os.O_RDONLY|noFollow, 0)
 	if err != nil {
 		return err
@@ -110,6 +110,9 @@ func decryptBackup(source, destination, password string) error {
 			return wrongPassphrase()
 		}
 	case bytes.HasPrefix(header, []byte("Salted__")):
+		if !allowLegacy {
+			return backupErrorf("This legacy v1 backup has no authentication. If you trust its source, retry from the command line with --allow-legacy-v1.")
+		}
 		fmt.Fprintln(term.stderr, "Warning: this legacy backup format does not authenticate its contents.")
 		if _, err := io.Copy(raw, io.MultiReader(bytes.NewReader(header), in)); err != nil {
 			return err
@@ -126,13 +129,9 @@ func decryptBackup(source, destination, password string) error {
 	return os.Chmod(destination, 0o600)
 }
 
-// opensslCrypt encrypts source into the EHP2 format at destination, or
-// decrypts either format.
-func opensslCrypt(source, destination, password string, decrypt bool) error {
+// encryptBackup writes source in the authenticated EHP2 format.
+func encryptBackup(source, destination, password string) error {
 	dir, name := filepath.Dir(destination), filepath.Base(destination)
-	if decrypt {
-		return decryptBackup(source, destination, password)
-	}
 	raw := filepath.Join(dir, fmt.Sprintf(".%s.raw.%d", name, os.Getpid()))
 	defer os.Remove(raw)
 	if err := runOpenSSLEnc(source, raw, password, false); err != nil {

@@ -241,7 +241,10 @@ func (d *Daemon) handleCertsIssue(body map[string]any) (int, map[string]any) {
 		return 200, map[string]any{"ok": false, "domain": domain, "alt_names": altNames, "source": "letsencrypt",
 			"dry_run": d.Opts.DryRun, "error": "Certbot executable was not found: " + d.Opts.CertbotBin}
 	}
-	email, defaultKeyType, rsaKeySize, ecdsaCurve := d.certbotSettings()
+	settings, err := d.certbotSettings()
+	if err != nil {
+		return 400, map[string]any{"ok": false, "error": err.Error()}
+	}
 	keyTypes := []string{}
 	if l, ok := keyTypesRaw.([]any); ok && len(l) > 0 {
 		for _, kt := range l {
@@ -251,7 +254,7 @@ func (d *Daemon) handleCertsIssue(body map[string]any) (int, map[string]any) {
 		}
 	}
 	if len(keyTypes) == 0 {
-		keyTypes = []string{defaultKeyType}
+		keyTypes = []string{settings.keyType}
 	}
 	accountID := d.latestAccountID(filepath.Join(d.Opts.LetsEncryptRoot, "accounts/acme-v02.api.letsencrypt.org/directory"))
 	results := []any{}
@@ -262,7 +265,7 @@ func (d *Daemon) handleCertsIssue(body map[string]any) (int, map[string]any) {
 		if len(keyTypes) > 1 {
 			lineage = lineageBase + "-" + kt
 		}
-		res, err := d.runCertbotForLineage(lineage, domain, altNames, kt, email, rsaKeySize, ecdsaCurve, accountID, dnsProfile, dnsPropagation)
+		res, err := d.runCertbotForLineage(lineage, domain, altNames, kt, settings.email, settings.rsaSize, settings.curve, accountID, dnsProfile, dnsPropagation)
 		if err != nil {
 			if isValueErr(err) {
 				panic(err)

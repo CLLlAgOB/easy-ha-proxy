@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -433,26 +434,42 @@ func (d *Daemon) dnsChallengeFlags(profile string, propagation any) ([]string, e
 	return append(flags, "--"+spec.Plugin+"-propagation-seconds", strconv.Itoa(seconds)), nil
 }
 
-// certbotSettings is _get_certbot_settings.
-func (d *Daemon) certbotSettings() (string, string, int, string) {
-	cfg := loadYAML(d.Opts.ConfigYAML)
-	email := yamlStrOr(cfg["certbot_email"], "admin@example.com")
-	keyType := yamlStrOr(cfg["cert_key_type"], "ecdsa")
-	rsaSize := 3072
-	if v := cfg["rsa_key_size"]; yamlTruthy(v) {
-		switch x := v.(type) {
-		case int:
-			rsaSize = x
-		case float64:
-			rsaSize = int(x)
-		case string:
-			if n, err := strconv.Atoi(strings.TrimSpace(x)); err == nil {
-				rsaSize = n
-			}
-		}
+type issuanceSettings struct {
+	email, keyType, curve string
+	rsaSize               int
+}
+
+func (d *Daemon) certbotSettings() (issuanceSettings, error) {
+	cfg, err := readYAML(d.Opts.ConfigYAML)
+	if err != nil && !os.IsNotExist(err) && d.Opts.ConfigYAML != "" {
+		return issuanceSettings{}, vErr("cannot safely read Certbot settings")
 	}
-	curve := yamlStrOr(cfg["ecdsa_curve"], "secp256r1")
-	return email, keyType, rsaSize, curve
+	settings := issuanceSettings{
+		email:   strings.TrimSpace(yamlStrOr(cfg["certbot_email"], "admin@example.com")),
+		keyType: strings.ToLower(strings.TrimSpace(yamlStrOr(cfg["cert_key_type"], "ecdsa"))),
+		curve:   strings.ToLower(strings.TrimSpace(yamlStrOr(cfg["ecdsa_curve"], "secp256r1"))),
+		rsaSize: 3072,
+	}
+	if addr, err := mail.ParseAddress(settings.email); err != nil || addr.Address != settings.email ||
+		len(settings.email) > 254 || strings.HasPrefix(settings.email, "-") {
+		return issuanceSettings{}, vErr("certbot_email must be a valid email address")
+	}
+	if settings.keyType != "rsa" && settings.keyType != "ecdsa" {
+		return issuanceSettings{}, vErr("cert_key_type must be rsa or ecdsa")
+	}
+	if value := cfg["rsa_key_size"]; value != nil && value != "" {
+		size, err := strconv.Atoi(strings.TrimSpace(fmt.Sprint(value)))
+		if err != nil || size < 2048 || size > 8192 {
+			return issuanceSettings{}, vErr("rsa_key_size must be an integer from 2048 to 8192")
+		}
+		settings.rsaSize = size
+	}
+	switch settings.curve {
+	case "secp256r1", "secp384r1", "secp521r1":
+	default:
+		return issuanceSettings{}, vErr("ecdsa_curve must be secp256r1, secp384r1 or secp521r1")
+	}
+	return settings, nil
 }
 
 func yamlTruthy(v any) bool {

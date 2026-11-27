@@ -2,6 +2,7 @@ package hostsec
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,6 +19,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
 var (
@@ -38,59 +41,51 @@ var (
 )
 
 var guardRun = func(argv []string) (string, error) {
-	cmd := exec.Command(argv[0], argv[1:]...)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	cmd := pyx.GroupCommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Stdin = nil
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "DEBIAN_FRONTEND=noninteractive")
-	var stdout, stderr bytes.Buffer
+	stdout := fullBuffer{limit: 2 << 20}
+	stderr := tailBuffer{limit: maxTailBytes}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	done := make(chan error, 1)
-	if err := cmd.Start(); err != nil {
-		return "", refusef("Command failed: %s: %v", filepath.Base(argv[0]), err)
-	}
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			code := 1
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				code = exitErr.ExitCode()
-			}
-			label := filepath.Base(argv[0])
-			if len(argv) > 1 {
-				label += " " + argv[1]
-			}
-			detail := repoURLRe.ReplaceAllString(stderr.String(), "[repository]")
-			detail = strings.Join(strings.Fields(detail), " ")
-			if len(detail) > 2000 {
-				detail = detail[:2000]
-			}
-			return "", refusef("Command failed: %s (exit %d): %s", label, code, detail)
-		}
-	case <-time.After(120 * time.Second):
-		_ = cmd.Process.Kill()
-		<-done
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
 		return "", refusef("Command timed out: %s", filepath.Base(argv[0]))
 	}
-	if stdout.Len() > 2*1024*1024 {
+	if err != nil {
+		code := 1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		}
+		label := filepath.Base(argv[0])
+		if len(argv) > 1 {
+			label += " " + argv[1]
+		}
+		detail := repoURLRe.ReplaceAllString(stderr.String(), "[repository]")
+		detail = strings.Join(strings.Fields(detail), " ")
+		if len(detail) > 2000 {
+			detail = detail[:2000]
+		}
+		return "", refusef("Command failed: %s (exit %d): %s", label, code, detail)
+	}
+	if stdout.overflow {
 		return "", refusef("Command output exceeds the safety limit: %s", filepath.Base(argv[0]))
 	}
-	return stdout.String(), nil
+	return stdout.buf.String(), nil
 }
 
 var guardRunUpgrade = func(argv []string, stdout io.Writer) error {
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "DEBIAN_FRONTEND=noninteractive")
-	out := &tailBuffer{limit: maxTailBytes}
-	cmd.Stdout = out
-	cmd.Stderr = out
-	err := cmd.Run()
-	if stdout != nil {
-		_, _ = fmt.Fprintln(stdout, repoURLRe.ReplaceAllString(out.String(), "[repository]"))
+	rc, output, err := runCommand(argv, cmdOpts{timeout: 90 * time.Minute})
+	if stdout != nil && output != "" {
+		_, _ = fmt.Fprintln(stdout, output)
 	}
 	if err != nil {
+		return refusef("OS package installation failed; inspect the package-manager state: %v", err)
+	}
+	if rc != 0 {
 		return refusef("OS package installation failed; inspect the package-manager state")
 	}
 	return nil

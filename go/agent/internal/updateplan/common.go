@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"easy-ha-proxy/panel/shared/pyyaml"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
 const (
@@ -95,7 +96,7 @@ type SubprocessRunner struct{}
 func (SubprocessRunner) Run(argv []string, timeout time.Duration) CommandResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd := pyx.GroupCommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C", "GIT_TERMINAL_PROMPT=0", "DEBIAN_FRONTEND=noninteractive")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

@@ -19,6 +19,7 @@ import (
 
 	"easy-ha-proxy/panel/shared/pyyaml"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/hostfile"
 )
 
 // alertSink is the part of the alert client metricsd uses.
@@ -306,7 +307,7 @@ var siteIDOther = regexp.MustCompile(`[^A-Za-z0-9_]`)
 
 // siteSlowThresholds is site_slow_thresholds.
 func siteSlowThresholds(path string) map[string]int64 {
-	raw, err := os.ReadFile(path)
+	raw, err := hostfile.ReadRegular(path, 16<<20)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("Cannot read %s for the sites' alert thresholds: %v", path, err)

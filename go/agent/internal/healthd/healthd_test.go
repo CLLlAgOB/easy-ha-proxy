@@ -14,6 +14,29 @@ import (
 	"time"
 )
 
+func TestMatchingUnitGlobDoesNotAllocateCursorForUnknownUnit(t *testing.T) {
+	old := CursorDir
+	CursorDir = t.TempDir()
+	t.Cleanup(func() { CursorDir = old })
+	scans := 0
+	s := NewState(Config{SystemdUnitGlobs: []string{"authelia-*.service"}, UnitsRescanSeconds: 60}, "", func(_ time.Duration, argv ...string) (int, string, string) {
+		if argv[0] != "systemctl" || argv[1] != "list-unit-files" {
+			t.Fatalf("unexpected command: %v", argv)
+		}
+		scans++
+		return 0, "", ""
+	})
+	for range 2 {
+		result := s.LogsSystemd("authelia-unused.service", 10, 60, "follow", false, "")
+		if result["ok"] != false || result["error"] != "unit is not installed" {
+			t.Fatalf("unexpected response: %v", result)
+		}
+	}
+	if scans != 1 {
+		t.Fatalf("repeated an empty unit scan %d times", scans)
+	}
+}
+
 func fakeRunner(t *testing.T) Runner {
 	t.Helper()
 	return func(_ time.Duration, argv ...string) (int, string, string) {

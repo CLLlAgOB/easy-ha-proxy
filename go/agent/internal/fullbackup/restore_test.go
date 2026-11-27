@@ -51,7 +51,7 @@ func fakeArchive(t *testing.T, root string) string {
 	writeText(t, payload, "payload")
 	manifest := map[string]any{"hostname": "proxy.example.test", "created_at": "20260718T120000Z",
 		"payload_expanded_bytes": jsonInt(1), "ssh_payload_expanded_bytes": nil}
-	swap(t, &openBackupArchive, func(string, string, bool) (*openedArchive, error) {
+	swap(t, &openBackupArchive, func(string, string, bool, bool) (*openedArchive, error) {
 		return &openedArchive{manifest: manifest, payload: payload}, nil
 	})
 	return payload

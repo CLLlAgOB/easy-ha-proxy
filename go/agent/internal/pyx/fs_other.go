@@ -3,7 +3,9 @@
 package pyx
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"syscall"
 )
 
@@ -44,3 +46,7 @@ func FlockRelease(_ *os.File)           {}
 func SessionAttr() *syscall.SysProcAttr { return nil }
 func KillGroup(_ int, _ syscall.Signal) {}
 func FsyncDir(_ string) error           { return nil }
+
+func GroupCommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, name, args...)
+}

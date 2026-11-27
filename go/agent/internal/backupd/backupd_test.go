@@ -245,6 +245,12 @@ func TestScheduleAndKeepLocal(t *testing.T) {
 	if out["schedule"].(map[string]any)["passphrase_stored"] != true || out["schedule"].(map[string]any)["keep_local"] != int64(5) {
 		t.Fatalf("save: %v", out)
 	}
+	if _, err := call(t, d, map[string]any{"action": "schedule_save", "passphrase": "a replacement passphrase", "time": "29:00"}); err == nil {
+		t.Fatal("invalid schedule was accepted")
+	}
+	if raw, err := os.ReadFile(d.Opts.SchedulePassphrase); err != nil || string(raw) != "a stored passphrase" {
+		t.Fatal("invalid schedule changed the stored passphrase")
+	}
 	if r := mustCall(t, d, map[string]any{"action": "run_scheduled"}); r["skipped"] != "the schedule is off" {
 		t.Fatalf("skip: %v", r)
 	}

@@ -456,7 +456,7 @@ func dispatchRestoreFull(ctx *Context, args []string) (bool, error) {
 	for i := 0; i < len(args); i++ {
 		switch flagKey(args[i]) {
 		case "-h", "--help":
-			fmt.Fprintln(ctx.Stdout, "usage: easy-ha-proxy restore-full [--mode {auto,fresh,overlay}] [--restore-ssh] [--skip-ssh] [--apply] archive")
+			fmt.Fprintln(ctx.Stdout, "usage: easy-ha-proxy restore-full [--mode {auto,fresh,overlay}] [--restore-ssh] [--skip-ssh] [--allow-legacy-v1] [--apply] archive")
 			return true, nil
 		case "--mode":
 			v, err := nextFlagValue(args, &i, "--mode")
@@ -471,6 +471,8 @@ func dispatchRestoreFull(ctx *Context, args []string) (bool, error) {
 			a.RestoreSSH = true
 		case "--skip-ssh":
 			a.SkipSSH = true
+		case "--allow-legacy-v1":
+			a.AllowLegacy = true
 		case "--apply":
 			a.Apply = true
 		default:

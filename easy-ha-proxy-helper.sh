@@ -641,7 +641,7 @@ ensure_local_installer() {
     die "$(message 'install-local.sh was not found and curl is unavailable for downloading it.' 'install-local.sh не найден, а curl для его загрузки недоступен.')"
   temporary_installer="$(mktemp -t easy-ha-proxy-install-local.XXXXXX.sh)"
   log "$(message 'Downloading the local installer' 'Загружаю локальный установщик')"
-  curl -fsSL "${raw_base}/install-local.sh" -o "${temporary_installer}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 180 "${raw_base}/install-local.sh" -o "${temporary_installer}"
   chmod 0700 "${temporary_installer}"
   local_installer="${temporary_installer}"
 }

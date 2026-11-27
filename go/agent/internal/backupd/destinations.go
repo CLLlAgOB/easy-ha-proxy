@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -248,16 +249,11 @@ func (d *Daemon) noteHostKeyChange(record map[string]any) string {
 	if kh, err := scanHostKey(pyStr(record["host"]), intOr(record["port"], 22)); err == nil {
 		offered = hostKeyFingerprints(kh)
 	}
-	if stored, err := d.loadDestination(record["name"]); err == nil {
-		offeredAny := make([]any, len(offered))
-		for i, o := range offered {
-			offeredAny[i] = o
-		}
-		stored["host_key_changed"] = map[string]any{"at": utcNow(), "offered": offeredAny}
-		if path, err := d.destinationPath(record["name"]); err == nil {
-			_ = d.atomicJSON(path, stored, 0o600)
-		}
+	offeredAny := make([]any, len(offered))
+	for i, o := range offered {
+		offeredAny[i] = o
 	}
+	_ = d.updateHostKeyStatus(record, map[string]any{"at": utcNow(), "offered": offeredAny})
 	msg := "the far end presented a different host key than the one pinned, so " +
 		"nothing was sent. If the server was reinstalled or its key replaced " +
 		"on purpose, trust the new key on the backups page"
@@ -265,6 +261,30 @@ func (d *Daemon) noteHostKeyChange(record map[string]any) string {
 		msg += " (offered: " + strings.Join(offered, ", ") + ")"
 	}
 	return msg + "."
+}
+
+func (d *Daemon) updateHostKeyStatus(record map[string]any, status map[string]any) error {
+	d.destinationMu.Lock()
+	defer d.destinationMu.Unlock()
+	current, err := d.loadDestination(record["name"])
+	if err != nil {
+		return err
+	}
+	for _, key := range []string{"type", "host", "port", "host_key_fingerprints"} {
+		if !reflect.DeepEqual(current[key], record[key]) {
+			return nil
+		}
+	}
+	if status != nil {
+		current["host_key_changed"] = status
+	} else {
+		delete(current, "host_key_changed")
+	}
+	path, err := d.destinationPath(record["name"])
+	if err != nil {
+		return err
+	}
+	return d.atomicJSON(path, current, 0o600)
 }
 
 func normalizePrivateKey(material string) []byte {
@@ -390,6 +410,8 @@ func hasControl(s string) bool {
 }
 
 func (d *Daemon) saveDestination(req map[string]any) (map[string]any, error) {
+	d.destinationMu.Lock()
+	defer d.destinationMu.Unlock()
 	if err := d.ensureDestinationsDir(); err != nil {
 		return nil, err
 	}
@@ -694,6 +716,8 @@ func (d *Daemon) saveS3Destination(req map[string]any, name, pathTarget string, 
 }
 
 func (d *Daemon) deleteDestination(req map[string]any) (map[string]any, error) {
+	d.destinationMu.Lock()
+	defer d.destinationMu.Unlock()
 	name := destName(req["name"])
 	pathTarget, err := d.destinationPath(name)
 	if err != nil {
@@ -826,6 +850,8 @@ func (d *Daemon) runSSH(record map[string]any, remote []string) (procResult, err
 }
 
 func (d *Daemon) retrustDestination(req map[string]any) (map[string]any, error) {
+	d.destinationMu.Lock()
+	defer d.destinationMu.Unlock()
 	record, err := d.loadDestination(req["name"])
 	if err != nil {
 		return nil, err
@@ -1641,11 +1667,8 @@ func (d *Daemon) testDestination(req map[string]any) (map[string]any, error) {
 		return map[string]any{"ok": false, "error": truncRunes(strings.TrimSpace(strings.ToValidUTF8(string(res.stderr), "�")), 500)}, nil
 	}
 	if truthy(record["host_key_changed"]) {
-		delete(record, "host_key_changed")
-		if p, err := d.destinationPath(record["name"]); err == nil {
-			if err := d.atomicJSON(p, record, 0o600); err != nil {
-				return nil, err
-			}
+		if err := d.updateHostKeyStatus(record, nil); err != nil {
+			return nil, err
 		}
 	}
 	return map[string]any{"ok": true, "destination": record["name"]}, nil

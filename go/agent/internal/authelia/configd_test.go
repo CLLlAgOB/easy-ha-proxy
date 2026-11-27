@@ -57,6 +57,14 @@ func TestConfigdRulesRoundTrip(t *testing.T) {
 
 func TestConfigdConfigViewMasksSecrets(t *testing.T) {
 	c, _ := newTestConfigd(t)
+	file, err := os.OpenFile(c.Opts.ConfigFile, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = file.WriteString("identity_providers:\n  oidc:\n    hmac_secret: private-hmac\n    issuer_private_key: private-issuer\n    jwks:\n    - key_id: issuer-id\n      key: private-jwk\n")
+	if closeErr := file.Close(); err != nil || closeErr != nil {
+		t.Fatalf("write %v, close %v", err, closeErr)
+	}
 	got, err := c.HandleRequest(req(t, `{"action":"config_view"}`), 1000)
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +73,12 @@ func TestConfigdConfigViewMasksSecrets(t *testing.T) {
 	if asMap(cfg.Value("session")).Value("secret") != "*****" || asMap(cfg.Value("access_control")).Value("rules") != nil {
 		t.Fatalf("config_view: %v", got)
 	}
+	oidc := asMap(asMap(cfg.Value("identity_providers")).Value("oidc"))
+	entry := asMap(oidc.Value("jwks").([]any)[0])
+	if oidc.Value("hmac_secret") != "*****" || oidc.Value("issuer_private_key") != "*****" ||
+		entry.Value("key") != "*****" || entry.Value("key_id") != "issuer-id" {
+		t.Fatalf("incorrect OIDC redaction: %v", oidc)
+	}
 }
 
 func TestConfigdSettingsAndPeers(t *testing.T) {
@@ -72,6 +86,10 @@ func TestConfigdSettingsAndPeers(t *testing.T) {
 	bad, _ := c.HandleRequest(req(t, `{"action":"settings_update","config":{"storage":{}}}`), 0)
 	if bad["error"] != "unsupported configuration sections: storage" {
 		t.Fatalf("%v", bad)
+	}
+	bad, _ = c.HandleRequest(req(t, `{"action":"settings_update","config":{"log":{"file_path":"/some/log"}}}`), 0)
+	if bad["ok"] != false || bad["error"] != "log.file_path is managed by the host" {
+		t.Fatalf("log path update: %v", bad)
 	}
 	ok, _ := c.HandleRequest(req(t, `{"action":"settings_update","config":{"session":{"secret":"x","expiration":"1h"},"log":{"level":"debug"}}}`), 0)
 	if ok["ok"] != true {

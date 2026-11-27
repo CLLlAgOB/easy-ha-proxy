@@ -1,9 +1,38 @@
 package certd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestCertbotSettingsValidateManagedValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vars.yml")
+	d := NewDaemon(Options{ConfigYAML: path})
+	for _, tc := range []struct {
+		config string
+		field  string
+	}{
+		{"certbot_email: operations@example.test\ncert_key_type: rsa\nrsa_key_size: '4096'\necdsa_curve: secp384r1\n", ""},
+		{"certbot_email: 'Operations <operations@example.test>'\n", "certbot_email"},
+		{"cert_key_type: unknown\n", "cert_key_type"},
+		{"rsa_key_size: 99999\n", "rsa_key_size"},
+		{"ecdsa_curve: unknown\n", "ecdsa_curve"},
+	} {
+		if err := os.WriteFile(path, []byte(tc.config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := d.certbotSettings()
+		if tc.field == "" {
+			if err != nil || settings.rsaSize != 4096 || settings.keyType != "rsa" || settings.curve != "secp384r1" {
+				t.Fatalf("settings = %+v, %v", settings, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), tc.field) {
+			t.Errorf("invalid %s: %v", tc.field, err)
+		}
+	}
+}
 
 func TestNormalizeDNSName(t *testing.T) {
 	cases := map[string]string{"Example.COM.": "example.com", "a-b.example.org": "a-b.example.org"}

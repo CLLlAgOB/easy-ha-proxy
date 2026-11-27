@@ -33,9 +33,9 @@ var (
 	cookieValueRe    = regexp.MustCompile(`^[A-Za-z0-9_.=;:/-]{1,128}$`)
 	alpnRe           = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,32}(?:,[A-Za-z0-9._/-]{1,32}){0,7}$`)
 	controlPlaneACL  = regexp.MustCompile(`(?m)^\s*acl\s+(host_admin|host_authelia)\s+hdr\(host\)\s+-i\s+(.+?)\s*$`)
-	unsafeHostChars  = regexp.MustCompile("[\\s#\"'`\\\\]")
 	unsafePathChars  = regexp.MustCompile("[\\s#\"'`]")
 	headerNameRe     = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
+	httpMethodRe     = regexp.MustCompile(`^[A-Z][A-Z0-9_-]{0,31}$`)
 	httpStatusRe     = regexp.MustCompile(`^[1-5][0-9]{2}$`)
 	haproxyNameStrip = regexp.MustCompile(`[^A-Za-z0-9_]`)
 )
@@ -461,6 +461,10 @@ func validateSite(siteV any, index int) error {
 	if _, err := validateDomain(orValue(site.Value("domain"), site.Value("name")), p+".domain", false); err != nil {
 		return err
 	}
+	return validateSiteFields(site, p)
+}
+
+func validateSiteFields(site *Map, p string) error {
 	if truthy(site.Value("backend_ip")) {
 		if _, err := validateHost(site.Value("backend_ip"), p+".backend_ip"); err != nil {
 			return err
@@ -484,7 +488,7 @@ func validateSite(siteV any, index int) error {
 		}
 	}
 	dnsProfile := site.Value("dns_profile")
-	if dnsProfile != nil && !dnsProfileRe.MatchString(strings.ToLower(strip(dnsProfile))) {
+	if profile := strip(dnsProfile); profile != "" && !dnsProfileRe.MatchString(strings.ToLower(profile)) {
 		return valueErr("%s.dns_profile: may use a-z, 0-9 and dashes", p)
 	}
 	for _, kv := range []struct {
@@ -592,7 +596,7 @@ func validateSite(siteV any, index int) error {
 		v := site.Value(key)
 		if v != nil && strip(v) != "" {
 			text := strip(v)
-			if pyLen(text) > 253 || unsafeHostChars.MatchString(text) {
+			if !hostRe.MatchString(text) || strings.ContainsRune(text, '%') {
 				return valueErr("%s.%s: invalid hostname", p, key)
 			}
 		}
@@ -605,13 +609,13 @@ func validateSite(siteV any, index int) error {
 				dotdot = true
 			}
 		}
-		if !strings.HasPrefix(ca, "/") || pyLen(ca) > 512 || unsafePathChars.MatchString(ca) || dotdot {
+		if !strings.HasPrefix(ca, "/") || pyLen(ca) > 512 || unsafePathChars.MatchString(ca) || strings.ContainsRune(ca, '\\') || dotdot {
 			return valueErr("%s.backend_ssl_ca: invalid CA file path", p)
 		}
 	}
 	if v := site.Value("health_uri"); v != nil && strip(v) != "" {
 		u := strip(v)
-		if !strings.HasPrefix(u, "/") || pyLen(u) > 512 || unsafePathChars.MatchString(u) {
+		if !strings.HasPrefix(u, "/") || pyLen(u) > 512 || unsafePathChars.MatchString(u) || strings.ContainsRune(u, '\\') {
 			return valueErr("%s.health_uri: must start with '/' and contain no spaces", p)
 		}
 	}
@@ -619,6 +623,17 @@ func validateSite(siteV any, index int) error {
 		if !httpStatusRe.MatchString(strip(v)) {
 			return valueErr("%s.health_status: must be an HTTP status code (100-599)", p)
 		}
+	}
+	for _, key := range []string{"err_window", "rate_window"} {
+		if t, ok := fieldText(site, key); ok && !haproxyTimeRe.MatchString(t) {
+			return valueErr("%s.%s: must be a time such as 20s", p, key)
+		}
+	}
+	if err := validateCounterLimit(site, "err_limit", p); err != nil {
+		return err
+	}
+	if err := validateErrorExclusions(site.Value("err_exclude"), p+".err_exclude", false); err != nil {
+		return err
 	}
 	if v := site.Value("add_headers"); v != nil {
 		hdrs, ok := asMap(v)
@@ -651,6 +666,85 @@ func validateSite(siteV any, index int) error {
 		}
 	}
 	return ValidateBackendTuning(site, p)
+}
+
+func validateCounterLimit(fields *Map, key, prefix string) error {
+	if raw := fields.Value(key); raw != nil {
+		n, err := strconv.ParseInt(strip(raw), 10, 64)
+		if err != nil || n < 0 || n > 1_000_000 {
+			return valueErr("%s.%s must be an integer from 0 to 1000000", prefix, key)
+		}
+	}
+	return nil
+}
+
+func validateErrorExclusions(raw any, label string, exact bool) error {
+	if raw == nil {
+		return nil
+	}
+	rules, ok := asList(raw)
+	if !ok || len(rules) > 128 {
+		return valueErr("%s must be a list of at most 128 rules", label)
+	}
+	for i, entry := range rules {
+		rule, ok := asMap(entry)
+		p := fmt.Sprintf("%s[%d]", label, i)
+		if !ok {
+			return valueErr("%s must be an object", p)
+		}
+		matches := 0
+		for _, key := range []string{"path", "path_beg", "path_reg"} {
+			value := rule.Value(key)
+			if value == nil || value == "" {
+				continue
+			}
+			text, ok := value.(string)
+			if !ok || len(text) > 512 || unsafePathChars.MatchString(text) ||
+				exact && key != "path" || strings.HasPrefix(text, "-") || strings.HasPrefix(text, "\\") || strings.HasSuffix(text, "\\") ||
+				key != "path_reg" && (!strings.HasPrefix(text, "/") || strings.ContainsRune(text, '\\')) {
+				return valueErr("%s.%s must be a single safe path or pattern", p, key)
+			}
+			matches++
+		}
+		if matches != 1 {
+			return valueErr("%s must specify exactly one path matcher", p)
+		}
+		if rawMethods := rule.Value("methods"); rawMethods != nil {
+			methods, ok := asList(rawMethods)
+			if !ok || len(methods) > 32 {
+				return valueErr("%s.methods must be a list of at most 32 HTTP methods", p)
+			}
+			for _, method := range methods {
+				text, ok := method.(string)
+				if !ok || !httpMethodRe.MatchString(text) {
+					return valueErr("%s.methods contains an invalid HTTP method", p)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateSiteDefaults(defaults *Map) error {
+	const label = "site_defaults"
+	if err := validateSiteFields(defaults, label); err != nil {
+		return err
+	}
+	for _, key := range []string{"auth_ip_expire", "ban_expire", "conn_table_expire", "conn_rate_window", "frontend_client_timeout",
+		"frontend_keepalive_timeout", "hard_req_window", "http_request_timeout", "nosni_tcp_window", "other_err_window"} {
+		if t, ok := fieldText(defaults, key); ok && !haproxyTimeRe.MatchString(t) {
+			return valueErr("%s.%s: must be a time such as 30s", label, key)
+		}
+	}
+	for _, key := range []string{"conn_cur_limit", "conn_rate_burst", "nosni_tcp_limit", "other_err_limit"} {
+		if err := validateCounterLimit(defaults, key, label); err != nil {
+			return err
+		}
+	}
+	if size, ok := fieldText(defaults, "other_err_size"); ok && !haproxySizeRe.MatchString(size) {
+		return valueErr("%s.other_err_size: must be a size such as 50k", label)
+	}
+	return validateErrorExclusions(defaults.Value("other_err_exclude_exact"), label+".other_err_exclude_exact", true)
 }
 
 // iterAny is iter(v) for the values YAML yields.
@@ -908,8 +1002,12 @@ func ValidateConfigData(kind string, data *Map) error {
 		}
 		return noSharedHAProxyNames(proxies, "tcp_proxies")
 	case "vars":
-		if d, ok := asMap(data.Value("site_defaults")); ok {
-			return ValidateBackendTuning(d, "site_defaults")
+		if v := data.Value("site_defaults"); v != nil {
+			d, ok := asMap(v)
+			if !ok {
+				return valueErr("site_defaults must be a mapping")
+			}
+			return validateSiteDefaults(d)
 		}
 	}
 	return nil

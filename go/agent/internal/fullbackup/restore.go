@@ -11,6 +11,8 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/hostfile"
 )
 
 type restoreOptions struct {
@@ -22,42 +24,13 @@ type restoreOptions struct {
 	apply           bool
 	replaceManaged  bool
 	passphraseStdin bool
+	allowLegacy     bool
 	yes             bool
 }
 
 type keyFile struct {
 	lines    []string
 	uid, gid int
-}
-
-// openRestoreDirectory pins a directory and refuses symlinks at every component.
-func openRestoreDirectory(p string, createMode uint32) (*os.File, error) {
-	p, err := filepath.Abs(p)
-	if err != nil {
-		return nil, err
-	}
-	const flags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
-	fd, err := unix.Open("/", flags, 0)
-	if err != nil {
-		return nil, err
-	}
-	for part := range strings.SplitSeq(strings.TrimPrefix(p, "/"), "/") {
-		if part == "" {
-			continue
-		}
-		next, err := unix.Openat(fd, part, flags, 0)
-		if createMode != 0 && errors.Is(err, unix.ENOENT) {
-			if err = unix.Mkdirat(fd, part, createMode); err == nil || errors.Is(err, unix.EEXIST) {
-				next, err = unix.Openat(fd, part, flags, 0)
-			}
-		}
-		_ = unix.Close(fd)
-		if err != nil {
-			return nil, &os.PathError{Op: "open restore directory", Path: p, Err: err}
-		}
-		fd = next
-	}
-	return os.NewFile(uintptr(fd), p), nil
 }
 
 func readRegularNoFollow(dir *os.File, name string) (string, *syscall.Stat_t, error) {
@@ -97,7 +70,7 @@ func currentAuthorizedKeys() map[string]keyFile {
 	more, _ := filepath.Glob(authorizedKeysGlob)
 	candidates = append(candidates, more...)
 	for _, p := range candidates {
-		dir, err := openRestoreDirectory(filepath.Dir(p), 0)
+		dir, err := hostfile.OpenDirectory(filepath.Dir(p), 0)
 		if err != nil {
 			continue
 		}
@@ -123,7 +96,7 @@ var mergeAuthorizedKeys = func(saved map[string]keyFile) error {
 }
 
 func mergeKeyFile(p string, old keyFile) error {
-	dir, err := openRestoreDirectory(filepath.Dir(p), 0o700)
+	dir, err := hostfile.OpenDirectory(filepath.Dir(p), 0o700)
 	if err != nil {
 		return err
 	}
@@ -737,7 +710,7 @@ func restoreBackup(o restoreOptions) error {
 		return err
 	}
 	defer os.RemoveAll(work)
-	opened, err := openBackupArchive(archive, work, o.passphraseStdin)
+	opened, err := openBackupArchive(archive, work, o.passphraseStdin, o.allowLegacy)
 	if err != nil {
 		return err
 	}

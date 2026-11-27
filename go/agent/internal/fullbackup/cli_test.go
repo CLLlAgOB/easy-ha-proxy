@@ -29,7 +29,7 @@ func TestBadCommandLinesExitTwo(t *testing.T) {
 }
 
 func TestAFailureIsReportedAsAnError(t *testing.T) {
-	t.Setenv("EASY_HA_PROXY_ALLOW_NON_ROOT", "1")
+	swap(t, &requireRoot, func() error { return nil })
 	var stdout, stderr strings.Builder
 	if code := RunCLI([]string{"inspect", "/nonexistent/backup.enc", "--passphrase-stdin"}, &stdout, &stderr); code != 2 ||
 		!strings.HasPrefix(stderr.String(), "ERROR: Backup file not found") {

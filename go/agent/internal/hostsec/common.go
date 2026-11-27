@@ -287,6 +287,7 @@ var runCommand = func(argv []string, opts cmdOpts) (int, string, error) {
 	}
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 5 * time.Second
 	out := &tailBuffer{limit: maxTailBytes}
 	var raw fullBuffer
 	if opts.rawOutput {

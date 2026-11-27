@@ -16,13 +16,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/hostfile"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 const (
-	backupTimerUnit     = "easy-ha-proxy-backup.timer"
-	defaultScheduleTime = "03:20"
-	defaultKeepLocal    = 3
+	backupTimerUnit            = "easy-ha-proxy-backup.timer"
+	defaultScheduleTime        = "03:20"
+	defaultKeepLocal           = 3
+	maxSchedulePassphraseBytes = 64 << 10
 )
 
 var scheduleTimeRe = regexp.MustCompile(`^([01][0-9]|2[0-3]):([0-5][0-9])$`)
@@ -54,15 +56,7 @@ func (d *Daemon) writeTimerTime(value string) error {
 		"OnCalendar=*-*-* " + value + ":00",
 		"",
 	}, "\n")
-	target := d.Opts.TimerDropinPath()
-	temporary := strings.TrimSuffix(target, ".conf") + ".conf.tmp"
-	if err := os.WriteFile(temporary, []byte(body), 0o644); err != nil {
-		return err
-	}
-	if err := os.Chmod(temporary, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, target); err != nil {
+	if err := hostfile.WriteAtomic(d.Opts.TimerDropinPath(), []byte(body), 0o644); err != nil {
 		return err
 	}
 	for _, args := range [][]string{{"daemon-reload"}, {"restart", backupTimerUnit}} {
@@ -195,6 +189,8 @@ func (d *Daemon) scheduleStatus() map[string]any {
 }
 
 func (d *Daemon) saveSchedule(req map[string]any) (map[string]any, error) {
+	d.scheduleMu.Lock()
+	defer d.scheduleMu.Unlock()
 	current := d.loadSchedule()
 	names, present := req["destinations"]
 	var list []any
@@ -217,23 +213,23 @@ func (d *Daemon) saveSchedule(req map[string]any) (map[string]any, error) {
 		}
 		chosen = append(chosen, name)
 	}
-	passphrase := req["passphrase"]
-	if s, ok := passphrase.(string); ok && s != "" {
-		p, err := requirePassphrase(s)
+	passphrase, changePassphrase := req["passphrase"].(string)
+	if changePassphrase && passphrase != "" {
+		checked, err := requirePassphrase(passphrase)
 		if err != nil {
 			return nil, err
 		}
-		if err := writePrivate(d.Opts.SchedulePassphrase, []byte(p)); err != nil {
-			return nil, err
-		}
-	} else if passphrase == "" {
-		_ = os.Remove(d.Opts.SchedulePassphrase)
+		passphrase = checked
 	}
 	enabled := current["enabled"].(bool)
 	if v, ok := req["enabled"]; ok && v != nil {
 		enabled = truthy(v)
 	}
-	if enabled && !isRegularFile(d.Opts.SchedulePassphrase) {
+	passphraseStored := current["passphrase_stored"].(bool)
+	if changePassphrase {
+		passphraseStored = passphrase != ""
+	}
+	if enabled && !passphraseStored {
 		return nil, bErr("invalid", "a stored passphrase is required before the schedule can run")
 	}
 	if enabled && len(chosen) == 0 {
@@ -261,7 +257,20 @@ func (d *Daemon) saveSchedule(req map[string]any) (map[string]any, error) {
 		"last_run": current["last_run"], "last_result": current["last_result"],
 		"time": wantedTime, "keep_local": keep,
 	}
+	var previous []byte
+	if changePassphrase {
+		previous, err = hostfile.ReadRegular(d.Opts.SchedulePassphrase, maxSchedulePassphraseBytes)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		if err := d.setSchedulePassphrase([]byte(passphrase)); err != nil {
+			return nil, err
+		}
+	}
 	if err := d.atomicJSON(d.Opts.SchedulePath, record, 0o600); err != nil {
+		if changePassphrase {
+			err = errors.Join(err, d.setSchedulePassphrase(previous))
+		}
 		return nil, err
 	}
 	if wantedTime != currentTime {
@@ -272,7 +281,20 @@ func (d *Daemon) saveSchedule(req map[string]any) (map[string]any, error) {
 	return map[string]any{"ok": true, "schedule": d.loadSchedule()}, nil
 }
 
+func (d *Daemon) setSchedulePassphrase(raw []byte) error {
+	path := d.Opts.SchedulePassphrase
+	if len(raw) > 0 {
+		return hostfile.WriteAtomic(path, raw, 0o600)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (d *Daemon) recordScheduleOutcome(result string) {
+	d.scheduleMu.Lock()
+	defer d.scheduleMu.Unlock()
 	record, err := d.safeJSONFile(d.Opts.SchedulePath)
 	if err != nil {
 		record = map[string]any{}
@@ -285,7 +307,18 @@ func (d *Daemon) recordScheduleOutcome(result string) {
 // runScheduledBackup makes a backup and sends it away, inline: the timer
 // wants an exit code.
 func (d *Daemon) runScheduledBackup(req map[string]any) (map[string]any, error) {
+	if !d.scheduledMu.TryLock() {
+		return nil, bErr("busy", "a scheduled backup is already running")
+	}
+	defer d.scheduledMu.Unlock()
+	d.scheduleMu.Lock()
 	schedule := d.loadSchedule()
+	var raw []byte
+	var passphraseErr error
+	if schedule["passphrase_stored"].(bool) {
+		raw, passphraseErr = hostfile.ReadRegular(d.Opts.SchedulePassphrase, maxSchedulePassphraseBytes)
+	}
+	d.scheduleMu.Unlock()
 	onDemand := truthy(req["on_demand"])
 	destinations := schedule["destinations"].([]string)
 	if !schedule["enabled"].(bool) && !onDemand {
@@ -298,9 +331,8 @@ func (d *Daemon) runScheduledBackup(req map[string]any) (map[string]any, error) 
 		d.recordScheduleOutcome("no stored passphrase")
 		return nil, bErr("invalid", "no stored passphrase")
 	}
-	raw, err := os.ReadFile(d.Opts.SchedulePassphrase)
-	if err != nil {
-		return nil, err
+	if passphraseErr != nil {
+		return nil, passphraseErr
 	}
 	started, err := d.startBackup(map[string]any{
 		"action": "start_backup", "passphrase": strings.TrimSpace(string(raw)),
@@ -418,6 +450,15 @@ func (d *Daemon) Dispatch(_ context.Context, req map[string]any) (resp map[strin
 	if len(unexpected) > 0 {
 		sort.Strings(unexpected)
 		return nil, bErr("invalid", "unexpected request fields: %s", strings.Join(unexpected, ", "))
+	}
+	switch action {
+	case "run_scheduled", "upload", "destination_test", "stage_backup":
+		select {
+		case d.longRequests <- struct{}{}:
+			defer func() { <-d.longRequests }()
+		default:
+			return nil, bErr("busy", "too many backup operations are running")
+		}
 	}
 	switch action {
 	case "status":

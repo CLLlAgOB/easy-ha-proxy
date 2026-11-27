@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path"
@@ -17,6 +18,8 @@ import (
 	"sync"
 	"time"
 )
+
+const maxCursorFiles = 512
 
 var (
 	// CursorDir holds journalctl --cursor-file state for "follow" log mode.
@@ -208,11 +211,12 @@ type State struct {
 	events         []map[string]any
 	lastCollect    time.Time
 	prevSig        map[string]string
+	unitsScanMu    sync.Mutex
 	unitsRescan    time.Time
 	unitsExpanded  []string
 	logs           *ttlCache
-	cursorLocks    map[string]*sync.Mutex
-	cursorLocksMux sync.Mutex
+	cursorLocks    [64]sync.Mutex
+	cursorCreateMu sync.Mutex
 }
 
 // NewState builds the state holder; run may be nil for the real commands.
@@ -222,13 +226,12 @@ func NewState(cfg Config, selfUnit string, run Runner) *State {
 	}
 	_ = os.MkdirAll(CursorDir, 0o755)
 	return &State{
-		Cfg:         cfg,
-		SelfUnit:    selfUnit,
-		Run:         run,
-		cache:       emptyCache(),
-		prevSig:     map[string]string{},
-		logs:        newTTLCache(logsCacheTTL, logsCacheMax, logsCacheMaxValue),
-		cursorLocks: map[string]*sync.Mutex{},
+		Cfg:      cfg,
+		SelfUnit: selfUnit,
+		Run:      run,
+		cache:    emptyCache(),
+		prevSig:  map[string]string{},
+		logs:     newTTLCache(logsCacheTTL, logsCacheMax, logsCacheMaxValue),
 	}
 }
 
@@ -358,10 +361,10 @@ func (s *State) expandUnits() []string {
 	if len(s.Cfg.SystemdUnitGlobs) == 0 {
 		return sortedSet(base)
 	}
-	s.mu.Lock()
-	need := len(s.unitsExpanded) == 0 || time.Since(s.unitsRescan) >= time.Duration(s.Cfg.UnitsRescanSeconds)*time.Second
+	s.unitsScanMu.Lock()
+	defer s.unitsScanMu.Unlock()
+	need := s.unitsRescan.IsZero() || time.Since(s.unitsRescan) >= time.Duration(s.Cfg.UnitsRescanSeconds)*time.Second
 	expanded := append([]string{}, s.unitsExpanded...)
-	s.mu.Unlock()
 	if !need {
 		return sortedSet(append(base, expanded...))
 	}
@@ -380,10 +383,8 @@ func (s *State) expandUnits() []string {
 			}
 		}
 	}
-	s.mu.Lock()
 	s.unitsExpanded = sortedSet(expanded)
 	s.unitsRescan = time.Now()
-	s.mu.Unlock()
 	return sortedSet(append(base, expanded...))
 }
 
@@ -529,14 +530,9 @@ func sanitizeCursorName(name string) string {
 }
 
 func (s *State) cursorLock(key string) *sync.Mutex {
-	s.cursorLocksMux.Lock()
-	defer s.cursorLocksMux.Unlock()
-	lk, ok := s.cursorLocks[key]
-	if !ok {
-		lk = &sync.Mutex{}
-		s.cursorLocks[key] = lk
-	}
-	return lk
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(key))
+	return &s.cursorLocks[hash.Sum32()%uint32(len(s.cursorLocks))]
 }
 
 // LogsSystemd is get_logs_systemd.
@@ -553,25 +549,36 @@ func (s *State) LogsSystemd(unit string, tail, since int, mode string, reset boo
 	cursor = strings.TrimSpace(cursor)
 	timeout := time.Duration(logsCmdTimeout) * time.Second
 	if mode == "follow" {
+		if !slices.Contains(s.Cfg.SystemdUnits, unit) && !slices.Contains(s.expandUnits(), unit) {
+			return map[string]any{"ok": false, "error": "unit is not installed", "unit": unit}
+		}
 		cursorFile := filepath.Join(CursorDir, sanitizeCursorName("systemd_"+unit)+".cursor")
 		key := fmt.Sprintf("systemd_follow|%s|%d|%d|%v", unit, tail, since, reset)
 		if cached := s.logs.get(key); cached != nil {
 			cached["cached"] = true
 			return cached
 		}
-		lk := s.cursorLock("systemd:" + unit)
+		lk := s.cursorLock(cursorFile)
 		lk.Lock()
+		defer lk.Unlock()
 		if reset {
 			_ = os.Remove(cursorFile)
 		}
 		var argv []string
-		if _, err := os.Stat(cursorFile); err != nil {
+		if info, err := os.Lstat(cursorFile); errors.Is(err, os.ErrNotExist) {
+			s.cursorCreateMu.Lock()
+			defer s.cursorCreateMu.Unlock()
+			entries, err := os.ReadDir(CursorDir)
+			if err != nil || len(entries) >= maxCursorFiles {
+				return map[string]any{"ok": false, "error": "cannot allocate a log cursor", "unit": unit}
+			}
 			argv = []string{"journalctl", "-u", unit, "--no-pager", "-q", "-o", "short-iso", "--cursor-file", cursorFile, "--lines", strconv.Itoa(tail), "--since", fmt.Sprintf("-%ds", since)}
-		} else {
+		} else if err == nil && info.Mode().IsRegular() {
 			argv = []string{"journalctl", "-u", unit, "--no-pager", "-q", "-o", "short-iso", "--cursor-file", cursorFile, "--lines", fmt.Sprintf("+%d", tail)}
+		} else {
+			return map[string]any{"ok": false, "error": "cannot check the log cursor", "unit": unit}
 		}
 		rc, out, errText := s.Run(timeout, argv...)
-		lk.Unlock()
 		text := out
 		if text == "" {
 			text = errText

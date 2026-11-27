@@ -34,7 +34,7 @@ jobs:
           docker run --rm --privileged \
             -v "$RUNNER_TEMP/easy-ha-proxy-agent:/usr/local/sbin/easy-ha-proxy-agent:ro" \
             -v "$RUNNER_TEMP/udp-forward-smoke:/usr/local/bin/udp-forward-smoke:ro" \
-            -e AGENT_BIN=/usr/local/sbin/easy-ha-proxy-agent debian:bookworm-slim \
+            -e AGENT_BIN=/usr/local/sbin/easy-ha-proxy-agent debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e \
             bash -lc 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq iptables iproute2 ipset >/dev/null && /usr/local/bin/udp-forward-smoke'
 
   server-state:
@@ -49,7 +49,7 @@ jobs:
           # dependencies use Debian, as in the UDP test, rather than relying
           # on this runner's unavailable Ubuntu archive DNS/mirror list.
           docker build --tag ehp-server-state-ci - <<'EOF'
-          FROM haproxy:2.8-bookworm
+          FROM haproxy:2.8-bookworm@sha256:76eaf6ffeebf5ef726281e49dfaa367ffab0f2e381f441ce72f83cbf080f5e1a
           USER root
           RUN apt-get -o Acquire::Retries=3 update -qq && \
               apt-get -o Acquire::Retries=3 install -y --no-install-recommends socat openssl && \
@@ -109,6 +109,7 @@ jobs:
           easy-ha-proxy-helper.sh
           installer/easy-ha-proxy
           installer/agent-fetch.sh
+          .tests/integration/agent_part.sh
 
       # Warnings and up: unquoted expansions, unused variables, tildes that do
       # not expand. Style notes are left alone.
@@ -121,6 +122,7 @@ jobs:
           easy-ha-proxy-helper.sh
           installer/easy-ha-proxy
           installer/agent-fetch.sh
+          .tests/integration/agent_part.sh
 
   lint:
     name: Lint
@@ -155,7 +157,7 @@ jobs:
       # are acknowledged one by one in .gitleaksignore.
       - name: gitleaks
         run: |
-          docker run --rm -v "$PWD":/repo --entrypoint sh ghcr.io/gitleaks/gitleaks:v8.28.0 -c \
+          docker run --rm -v "$PWD":/repo --entrypoint sh ghcr.io/gitleaks/gitleaks:v8.28.0@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854 -c \
             'git config --global --add safe.directory /repo &&
              gitleaks git /repo --gitleaks-ignore-path /repo/.gitleaksignore --no-banner --redact --verbose'
 

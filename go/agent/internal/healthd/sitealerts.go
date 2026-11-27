@@ -18,6 +18,7 @@ import (
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxy"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/hostfile"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 	"gopkg.in/yaml.v3"
 )
@@ -208,11 +209,10 @@ func stateFileSafe(info os.FileInfo) bool {
 }
 
 func readSiteAlertFile(path string, maxBytes int64, state bool) ([]byte, error) {
-	flags := os.O_RDONLY | syscall.O_NONBLOCK
-	if state {
-		flags |= syscall.O_NOFOLLOW
+	if !state {
+		return hostfile.ReadRegular(path, maxBytes)
 	}
-	f, err := os.OpenFile(path, flags, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +221,7 @@ func readSiteAlertFile(path string, maxBytes int64, state bool) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > maxBytes || (state && !stateFileSafe(info)) {
+	if info.Size() > maxBytes || !stateFileSafe(info) {
 		return nil, fmt.Errorf("invalid site alerts file %s", path)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))

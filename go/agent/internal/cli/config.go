@@ -219,13 +219,13 @@ func InternalCAExportPath() string {
 	return filepath.Join(InstallHome(), "internal-ca.crt")
 }
 
-// RequireRoot verifies root privileges unless EASY_HA_PROXY_ALLOW_NON_ROOT=1.
+// RequireRoot verifies root privileges.
 func RequireRoot() error {
 	return requireRootFn()
 }
 
 func defaultRequireRoot() error {
-	if os.Geteuid() != 0 && os.Getenv("EASY_HA_PROXY_ALLOW_NON_ROOT") != "1" {
+	if os.Geteuid() != 0 {
 		return installerErrorf("Run this command as root (sudo easy-ha-proxy ...).")
 	}
 	return nil

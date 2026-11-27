@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/hostfile"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
@@ -261,12 +262,8 @@ func (d *Daemon) handleCAClientAuth(body map[string]any) (int, map[string]any) {
 	}
 	path, err := d.clientAuthTrustPath()
 	if err == nil {
-		tmp := path + ".tmp"
 		raw := jsonIndent(map[string]any{"version": 1, "ids": ids})
-		if err = os.WriteFile(tmp, append(raw, '\n'), 0o600); err == nil {
-			_ = os.Chmod(tmp, 0o600)
-			err = os.Rename(tmp, path)
-		}
+		err = hostfile.WriteAtomic(path, append(raw, '\n'), 0o600)
 	}
 	d.caMu.Unlock()
 	if err != nil {

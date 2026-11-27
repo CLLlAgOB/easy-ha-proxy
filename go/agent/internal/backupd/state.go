@@ -31,7 +31,11 @@ type Daemon struct {
 	Opts   Options
 	Alerts *alerts.Client
 
-	stateMu sync.Mutex // STATE_LOCK
+	stateMu       sync.Mutex // STATE_LOCK
+	scheduleMu    sync.Mutex
+	destinationMu sync.Mutex
+	scheduledMu   sync.Mutex
+	longRequests  chan struct{}
 
 	jobCacheMu sync.Mutex
 	jobCache   map[string]jobCacheEntry
@@ -64,13 +68,14 @@ type uploadLock struct {
 // NewDaemon builds a daemon over opts without touching the filesystem.
 func NewDaemon(opts Options) *Daemon {
 	d := &Daemon{
-		Opts:     opts,
-		Alerts:   alerts.FromEnv(),
-		uploads:  map[string]*uploadLock{},
-		shutdown: make(chan struct{}),
-		stop:     make(chan struct{}),
-		sleep:    time.Sleep,
-		helper:   []string{"/usr/local/sbin/easy-ha-proxy-agent", "full-backup"},
+		Opts:         opts,
+		Alerts:       alerts.FromEnv(),
+		uploads:      map[string]*uploadLock{},
+		longRequests: make(chan struct{}, max(1, min(3, opts.MaxConnections/2))),
+		shutdown:     make(chan struct{}),
+		stop:         make(chan struct{}),
+		sleep:        time.Sleep,
+		helper:       []string{"/usr/local/sbin/easy-ha-proxy-agent", "full-backup"},
 	}
 	d.transient = d.transientJobsSupported
 	return d

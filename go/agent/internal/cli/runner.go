@@ -1204,11 +1204,12 @@ func CommandBackupFull(ctx *Context, args BackupFullArgs) error {
 
 // RestoreFullArgs holds arguments for "easy-ha-proxy restore-full".
 type RestoreFullArgs struct {
-	Archive    string
-	Mode       string
-	RestoreSSH bool
-	SkipSSH    bool
-	Apply      bool
+	Archive     string
+	Mode        string
+	RestoreSSH  bool
+	SkipSSH     bool
+	AllowLegacy bool
+	Apply       bool
 }
 
 // CommandRestoreFull invokes "easy-ha-proxy-agent full-backup restore".
@@ -1233,6 +1234,9 @@ func CommandRestoreFull(ctx *Context, args RestoreFullArgs) error {
 	}
 	if args.SkipSSH {
 		cmd = append(cmd, "--skip-ssh")
+	}
+	if args.AllowLegacy {
+		cmd = append(cmd, "--allow-legacy-v1")
 	}
 	if args.Apply {
 		cmd = append(cmd, "--apply")

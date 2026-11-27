@@ -3,7 +3,6 @@ package fullbackup
 import (
 	"bytes"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,7 +32,6 @@ func atATerminal(t *testing.T, yes bool) *bytes.Buffer {
 	swap(t, &term.isTTY, func() bool { return yes })
 	errors := &bytes.Buffer{}
 	swap(t, &term.stderr, io.Writer(errors))
-	os.Unsetenv("EASY_HA_PROXY_TEST_PASSPHRASE")
 	return errors
 }
 
@@ -104,10 +102,9 @@ func TestWhoCountsAsTyping(t *testing.T) {
 	}
 	t.Setenv("EASY_HA_PROXY_TEST_PASSPHRASE", passphrase)
 	t.Setenv("EASY_HA_PROXY_ALLOW_NON_ROOT", "1")
-	if passphraseIsTyped(false) {
-		t.Fatal("the test passphrase is typed by nobody")
+	if !passphraseIsTyped(false) {
+		t.Fatal("environment variables disabled terminal passphrase input")
 	}
-	os.Unsetenv("EASY_HA_PROXY_TEST_PASSPHRASE")
 	swap(t, &term.isTTY, func() bool { return false })
 	if passphraseIsTyped(false) {
 		t.Fatal("no terminal")
@@ -124,7 +121,7 @@ func openWith(t *testing.T, outcomes []outcome, terminal bool, answers ...string
 	work := t.TempDir()
 	errors := atATerminal(t, terminal)
 	tp := typed(t, answers...)
-	swap(t, &validateBackupArchive, func(_, _, work string, _ bool) (*openedArchive, error) {
+	swap(t, &validateBackupArchive, func(_, _, work string, _, _ bool) (*openedArchive, error) {
 		next := outcomes[0]
 		outcomes = outcomes[1:]
 		if next.err != nil {
@@ -133,7 +130,7 @@ func openWith(t *testing.T, outcomes []outcome, terminal bool, answers ...string
 		}
 		return next.opened, nil
 	})
-	opened, err := openBackupArchive(filepath.Join(work, "backup.tar.gz.enc"), work, false)
+	opened, err := openBackupArchive(filepath.Join(work, "backup.tar.gz.enc"), work, false, false)
 	return opened, tp, errors, work, err
 }
 

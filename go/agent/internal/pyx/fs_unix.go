@@ -3,8 +3,12 @@
 package pyx
 
 import (
+	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"syscall"
+	"time"
 )
 
 // StatInfo is the subset of os.stat_result the Python checks read.
@@ -61,6 +65,21 @@ func SessionAttr() *syscall.SysProcAttr { return &syscall.SysProcAttr{Setsid: tr
 
 // KillGroup is os.killpg.
 func KillGroup(pid int, sig syscall.Signal) { _ = syscall.Kill(-pid, sig) }
+
+// GroupCommandContext bounds a command and the subprocesses it starts.
+func GroupCommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = 5 * time.Second
+	return cmd
+}
 
 // FsyncDir fsyncs a directory.
 func FsyncDir(path string) error {

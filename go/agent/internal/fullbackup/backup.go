@@ -263,7 +263,7 @@ func createBackup(o backupOptions) (string, error) {
 	if _, err := run(append([]string{"tar", "-czf", bundle, "-C", work}, names...), runOptions{check: true}); err != nil {
 		return "", err
 	}
-	if err := opensslCrypt(bundle, encrypted, password, false); err != nil {
+	if err := encryptBackup(bundle, encrypted, password); err != nil {
 		return "", err
 	}
 	checksum, err := sha256File(encrypted)
@@ -440,14 +440,14 @@ type openedArchive struct {
 
 // validateBackupArchive decrypts and fully validates an archive without
 // changing the host.
-var validateBackupArchive = func(archive, password, work string, checksumVerified bool) (*openedArchive, error) {
+var validateBackupArchive = func(archive, password, work string, checksumVerified, allowLegacy bool) (*openedArchive, error) {
 	if !checksumVerified {
 		if err := verifyEncryptedArchive(archive); err != nil {
 			return nil, err
 		}
 	}
 	bundle := filepath.Join(work, "bundle.tar.gz")
-	if err := opensslCrypt(archive, bundle, password, true); err != nil {
+	if err := decryptBackup(archive, bundle, password, allowLegacy); err != nil {
 		return nil, err
 	}
 	if err := extractBundle(bundle, work); err != nil {
@@ -526,14 +526,14 @@ var validateBackupArchive = func(archive, password, work string, checksumVerifie
 // openBackupArchive asks for the passphrase and opens the archive with it.
 // A person at a terminal is asked again when the passphrase does not open
 // it; anything else wrong with the archive still ends the run.
-var openBackupArchive = func(archive, work string, fromStdin bool) (*openedArchive, error) {
+var openBackupArchive = func(archive, work string, fromStdin, allowLegacy bool) (*openedArchive, error) {
 	retry := passphraseIsTyped(fromStdin)
 	for {
 		password, err := readPassphrase(false, fromStdin)
 		if err != nil {
 			return nil, err
 		}
-		opened, err := validateBackupArchive(archive, password, work, true)
+		opened, err := validateBackupArchive(archive, password, work, true, allowLegacy)
 		if err == nil {
 			return opened, nil
 		}
@@ -561,7 +561,7 @@ func resolveArchive(p string) string {
 	return abs
 }
 
-func inspectBackup(archive string, passphraseStdin bool) (map[string]any, error) {
+func inspectBackup(archive string, passphraseStdin, allowLegacy bool) (map[string]any, error) {
 	archive = resolveArchive(archive)
 	if err := verifyEncryptedArchive(archive); err != nil {
 		return nil, err
@@ -571,7 +571,7 @@ func inspectBackup(archive string, passphraseStdin bool) (map[string]any, error)
 		return nil, err
 	}
 	defer os.RemoveAll(work)
-	opened, err := openBackupArchive(archive, work, passphraseStdin)
+	opened, err := openBackupArchive(archive, work, passphraseStdin, allowLegacy)
 	if err != nil {
 		return nil, err
 	}
