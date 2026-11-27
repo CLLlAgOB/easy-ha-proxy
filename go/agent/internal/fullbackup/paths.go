@@ -94,6 +94,8 @@ var (
 		"var/lib/easy-ha-proxy/backup-web/backups",
 		"var/lib/easy-ha-proxy/backup-web/uploads",
 		"var/lib/easy-ha-proxy/update-web",
+		// Package migration work trees contain links and are preserved in place on restore.
+		"var/lib/easy-ha-proxy/haproxy-package-migration",
 		// The request log: every visitor's address, path and user agent over
 		// a few days. It rebuilds itself, and an archive often sent off the
 		// host is no place for it.

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -389,6 +390,49 @@ func TestNotificationSecretsAreExcludedFromThePayload(t *testing.T) {
 	if !names[strings.TrimLeft(filepath.Join(authelia, "configuration.yml"), "/")] ||
 		names[strings.TrimLeft(filepath.Join(authelia, "notification.log"), "/")] || names[strings.TrimLeft(state, "/")] {
 		t.Fatalf("names %v", names)
+	}
+}
+
+func TestBackupExcludesTheHAProxyMigrationWorkTree(t *testing.T) {
+	requireTools(t, "tar")
+	root := t.TempDir()
+	const state = "var/lib/easy-ha-proxy"
+	const migration = state + "/haproxy-package-migration"
+	const managed = state + "/managed.json"
+	const content = "managed state\n"
+	packageDir := filepath.Join(root, migration, "transaction/target/usr/lib")
+	writeText(t, filepath.Join(packageDir, "library.so.1.0"), "staged library\n")
+	if err := os.Symlink("library.so.1.0", filepath.Join(packageDir, "library.so.1")); err != nil {
+		t.Fatal(err)
+	}
+	writeText(t, filepath.Join(root, managed), content)
+
+	runTar := runCommand
+	swap(t, &runCommand, func(argv []string, opts runOptions) (runResult, error) {
+		argv = slices.Clone(argv)
+		argv[slices.Index(argv, "-C")+1] = root
+		return runTar(argv, opts)
+	})
+	payload := filepath.Join(root, "payload.tar.gz")
+	if _, err := createPayload(payload, []string{"/" + state}, backupExcludes); err != nil {
+		t.Fatal(err)
+	}
+	if expanded, err := validatePayload(payload, false); err != nil || expanded != int64(len(content)) {
+		t.Fatalf("backup payload: expanded = %d, error = %v", expanded, err)
+	}
+	found := false
+	if err := eachMember(payload, func(h *tar.Header, _ map[string]string, _ io.Reader) error {
+		name := strings.TrimSuffix(h.Name, "/")
+		if name == migration || strings.HasPrefix(name, migration+"/") {
+			t.Errorf("migration entry was archived: %s", name)
+		}
+		found = found || name == managed
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("backup omitted the managed file next to the migration work tree")
 	}
 }
 

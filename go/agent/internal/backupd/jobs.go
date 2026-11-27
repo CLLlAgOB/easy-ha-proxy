@@ -471,8 +471,7 @@ func (d *Daemon) runTransientHelper(argv []string, passphrase, jobID, recoverySo
 		props := systemctlProperties(unit, []string{"LoadState", "ActiveState", "SubState", "ExecMainStatus"})
 		active := props["ActiveState"]
 		if props["LoadState"] == "not-found" {
-			returncode = 0
-			break
+			return helperResult{}, bErr("invalid", "the privileged backup job disappeared before its result was recorded")
 		}
 		if active == "failed" {
 			rc, err := strconv.Atoi(props["ExecMainStatus"])
