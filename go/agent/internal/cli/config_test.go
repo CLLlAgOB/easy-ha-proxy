@@ -128,6 +128,40 @@ func TestSyncRuntimeHAProxyConfig(t *testing.T) {
 	}
 }
 
+func TestSyncRuntimeDoesNotCarryHostOwnedSocket(t *testing.T) {
+	// haproxy_socket flows into root-run shell templates; the runtime files
+	// are writable by the unprivileged panel container, so the sync must keep
+	// the host-owned socket and never carry a container-supplied value.
+	root := t.TempDir()
+	managed := filepath.Join(root, "managed")
+	runtime := filepath.Join(root, "runtime")
+	_ = os.MkdirAll(managed, 0o700)
+	_ = os.MkdirAll(runtime, 0o700)
+	_ = WriteText(filepath.Join(managed, "metadata.yml"), "configuration_pending: false\n", 0o600)
+	_ = WriteText(filepath.Join(managed, "vars.yml"),
+		"haproxy_socket: /run/haproxy/admin.sock\nhaproxy_socket_group: hadmin\nenable_http80: false\n", 0o600)
+	_ = WriteText(filepath.Join(managed, "websites.yml"), "sites: []\n", 0o600)
+	_ = WriteText(filepath.Join(managed, "tcp.yml"), "tcp_proxies: []\n", 0o600)
+	_ = WriteText(filepath.Join(runtime, "vars.yml"),
+		"haproxy_socket: '$(touch /tmp/pwned)'\nhaproxy_socket_group: '$(id)'\nenable_http80: true\n", 0o600)
+	_ = WriteText(filepath.Join(runtime, "websites.yml"), "sites: []\n", 0o600)
+	_ = WriteText(filepath.Join(runtime, "tcp.yml"), "tcp_proxies: []\n", 0o600)
+	var out bytes.Buffer
+	if _, err := SyncRuntimeHAProxyConfigToManaged(&out, managed, runtime); err != nil {
+		t.Fatal(err)
+	}
+	vars, _ := LoadYAMLMapping(filepath.Join(managed, "vars.yml"))
+	if vars.Value("haproxy_socket") != "/run/haproxy/admin.sock" {
+		t.Fatalf("host-owned socket was overwritten from runtime: %v", vars.Value("haproxy_socket"))
+	}
+	if vars.Value("haproxy_socket_group") != "hadmin" {
+		t.Fatalf("host-owned socket group was overwritten from runtime: %v", vars.Value("haproxy_socket_group"))
+	}
+	if vars.Value("enable_http80") != true {
+		t.Fatalf("panel-owned setting did not sync: %v", vars.Value("enable_http80"))
+	}
+}
+
 func TestSyncRuntimeAutheliaRules(t *testing.T) {
 	root := t.TempDir()
 	managedDir := filepath.Join(root, "etc")

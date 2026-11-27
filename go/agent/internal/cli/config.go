@@ -104,6 +104,14 @@ var (
 		ChangesComponent: true,
 	}
 
+	// RuntimeHAProxyVarKeys are the render settings the panel owns and the
+	// sync carries from the container-writable runtime config into the managed
+	// root config. Host-owned infrastructure keys (haproxy_socket,
+	// haproxy_socket_group, root_domain, the native delivery settings) must
+	// never be here: the runtime files are writable by the unprivileged panel
+	// container, and a value like haproxy_socket flows into root-run shell
+	// templates (haproxy-state-dump.sh, update-admin-rt.sh), so carrying it
+	// would hand a compromised container command execution as root.
 	RuntimeHAProxyVarKeys = map[string]bool{
 		"admin_allowed_ips":    true,
 		"admin_ips_enabled":    true,
@@ -115,8 +123,6 @@ var (
 		"geoip_mode":           true,
 		"haproxy_nbthread":     true,
 		"haproxy_nbthread_max": true,
-		"haproxy_socket":       true,
-		"haproxy_socket_group": true,
 		"localpeer":            true,
 		"peers_bind":           true,
 		"peers_enabled":        true,
