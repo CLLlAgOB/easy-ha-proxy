@@ -41,6 +41,8 @@ ansible/tcp.yml
 ansible/roles/cert/files/
 credentials/
 HIDE/
+# Test instructions for an AI tester, with the test stands' passwords: never published.
+TESTING_AI/
 .keys/
 **/.ssh/
 *id_rsa*
