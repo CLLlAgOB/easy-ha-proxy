@@ -3,8 +3,11 @@ package controld
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"easy-ha-proxy/panel/shared/jinja"
 )
 
 const goodConfig = `global
@@ -39,6 +42,69 @@ func TestConfigPolicy(t *testing.T) {
 	}
 	if err := enforceConfigPolicy([]byte("global\n\xff")); err == nil || !strings.Contains(err.Error(), "can't decode byte 0xff in position 7") {
 		t.Fatalf("utf-8: %v", err)
+	}
+}
+
+// HAProxy opens files and creates Unix sockets as root before the privilege
+// drop, in every section: a path outside the host directories lets a
+// compromised panel container read root files or overwrite host files.
+func TestConfigPolicyFilePaths(t *testing.T) {
+	legit := goodConfig + `
+defaults
+    errorfile 403 /etc/haproxy/errors/403.http
+
+frontend fe2
+    bind 127.0.0.1:8443 ssl crt /etc/haproxy/certs/site.pem ca-file /etc/haproxy/mtls/clients-ca.pem
+    bind /run/haproxy/extra.sock mode 660
+    acl whitelist src -f /etc/haproxy/admin.allow
+    http-request return status 403 content-type text/html lf-file /etc/haproxy/errors/ban.html if whitelist
+`
+	if err := enforceConfigPolicy([]byte(legit)); err != nil {
+		t.Fatalf("legitimate file directives refused: %v", err)
+	}
+	attacks := []string{
+		goodConfig + "\nfrontend x\n    http-request return status 200 content-type text/plain file /etc/easy-ha-proxy/daemons.env\n",
+		goodConfig + "\ndefaults\n    errorfile 403 /etc/easy-ha-proxy/daemons.env\n",
+		goodConfig + "\nfrontend x\n    bind /etc/cron.d/pwned mode 660\n",
+		goodConfig + "\nfrontend x\n    acl leak src -f /etc/easy-ha-proxy/secrets.yml\n",
+		goodConfig + "\nfrontend x\n    bind 127.0.0.1:8443 ssl crt /etc/easy-ha-proxy/secrets.yml\n",
+		goodConfig + "\nfrontend x\n    acl escape src -f /etc/haproxy/../../etc/shadow\n",
+		strings.Replace(goodConfig, "    chroot", "    ca-base /etc/easy-ha-proxy\n    chroot", 1),
+	}
+	for _, cfg := range attacks {
+		if err := enforceConfigPolicy([]byte(cfg)); err == nil {
+			t.Errorf("accepted attack config:\n%s", cfg)
+		}
+	}
+}
+
+// The policy must accept the configuration the template actually renders, or
+// every panel config save would break.
+func TestConfigPolicyAcceptsTheRenderedTemplate(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	root := filepath.Join(filepath.Dir(file), "..", "..", "..", "..")
+	dir := filepath.Join(root, "ansible", "roles", "haproxy", "templates")
+	if _, err := os.Stat(filepath.Join(dir, "haproxy.cfg.j2")); err != nil {
+		t.Skip("haproxy.cfg.j2 not found")
+	}
+	env := jinja.NewEnvironment(func(name string) (string, error) {
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		return string(raw), err
+	})
+	env.Autoescape = false
+	env.TrimBlocks = true
+	env.LstripBlocks = true
+	jinja.AddAnsibleFilters(env)
+	env.Filters["regex_replace"] = jinja.RegexReplaceFilter
+	env.Filters["combine"] = jinja.CombineFilter
+	rendered, err := env.Render("haproxy.cfg.j2", map[string]any{
+		"sites": []any{}, "tcp_proxies": []any{}, "ansible_processor_vcpus": int64(1),
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if err := enforceConfigPolicy([]byte(rendered)); err != nil {
+		t.Fatalf("the rendered template config is refused by the policy: %v", err)
 	}
 }
 

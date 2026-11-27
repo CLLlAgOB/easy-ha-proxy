@@ -129,6 +129,93 @@ func normalizedPrefixPath(raw, allowedPrefix string) bool {
 	return strings.HasPrefix(normalized, strings.TrimRight(allowedPrefix, "/")+"/")
 }
 
+// policyPathUnder reports whether an absolute file path stays under one of the
+// allowed host prefixes (the directory itself or a child, no ".." escape).
+func policyPathUnder(raw string, prefixes ...string) bool {
+	if raw == "" || !strings.HasPrefix(raw, "/") || strings.Contains(raw, "\x00") {
+		return false
+	}
+	for _, p := range pyPathParts(raw) {
+		if p == ".." {
+			return false
+		}
+	}
+	normalized := filepath.Clean(raw)
+	for _, p := range prefixes {
+		base := strings.TrimRight(p, "/")
+		if normalized == base || strings.HasPrefix(normalized, base+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// policyFilePaths guards file-bearing directives in EVERY section. HAProxy
+// starts as UID 0 and opens files / creates Unix sockets before the chroot and
+// privilege drop, so a path outside the host-owned directories in any section
+// lets a compromised panel container read arbitrary root files (errorfile,
+// acl -f, crt, ca-file, return ... file) or overwrite host files (unix bind).
+func policyFilePaths(token string, parts []string) error {
+	// No path argument may climb out with "..".
+	for _, p := range parts[1:] {
+		if strings.HasPrefix(p, "/") || strings.HasPrefix(p, "unix@/") {
+			for _, part := range pyPathParts(strings.TrimPrefix(p, "unix@")) {
+				if part == ".." {
+					return vErr("HAProxy file path may not contain '..'")
+				}
+			}
+		}
+	}
+	switch token {
+	case "errorfile":
+		if len(parts) >= 3 && !policyPathUnder(parts[2], "/etc/haproxy/") {
+			return vErr("HAProxy errorfile must stay under /etc/haproxy")
+		}
+	case "ca-base", "crt-base":
+		if len(parts) >= 2 && strings.HasPrefix(parts[1], "/") &&
+			!policyPathUnder(parts[1], "/etc/haproxy/", "/etc/ssl/certs/", "/etc/ssl/private/") {
+			return vErr("HAProxy %s must stay under /etc/haproxy or /etc/ssl", token)
+		}
+	case "bind":
+		// Only the bind address can be a Unix socket; crt/ca-file options are
+		// file paths checked by the embedded-keyword scan below.
+		if len(parts) >= 2 {
+			addr := parts[1]
+			if strings.HasPrefix(addr, "/") || strings.HasPrefix(addr, "unix@") {
+				if !policyPathUnder(strings.TrimPrefix(addr, "unix@"), "/run/haproxy/") {
+					return vErr("HAProxy unix bind socket must stay under /run/haproxy")
+				}
+			}
+		}
+	}
+	// File-bearing keywords also appear as options inside bind/server/
+	// default-server/acl/return lines, not only as the leading directive.
+	for i, p := range parts {
+		switch p {
+		case "crt", "ca-file", "crl-file":
+			if i+1 < len(parts) && strings.HasPrefix(parts[i+1], "/") &&
+				!policyPathUnder(parts[i+1], "/etc/haproxy/", "/etc/ssl/certs/", "/etc/ssl/private/") {
+				return vErr("HAProxy %s must stay under /etc/haproxy or /etc/ssl", p)
+			}
+		case "-f":
+			if i+1 < len(parts) && !policyPathUnder(parts[i+1], "/etc/haproxy/") {
+				return vErr("HAProxy acl file must stay under /etc/haproxy")
+			}
+		case "file":
+			// "return ... file <path>" reads an arbitrary root file into the
+			// response; the template only uses lf-file under /etc/haproxy.
+			if token == "http-request" || token == "http-response" {
+				return vErr("HAProxy %s ... file is not allowed", token)
+			}
+		case "lf-file":
+			if i+1 < len(parts) && !policyPathUnder(parts[i+1], "/etc/haproxy/") {
+				return vErr("HAProxy lf-file must stay under /etc/haproxy")
+			}
+		}
+	}
+	return nil
+}
+
 var (
 	// The lua-prepend-path values haproxy.cfg.j2 writes.
 	approvedLuaSearchPaths = map[string]bool{
@@ -205,6 +292,9 @@ func enforceConfigPolicy(raw []byte) error {
 		}
 		if token == "option" && len(parts) >= 2 && strings.ToLower(parts[1]) == "external-check" {
 			return vErr("HAProxy directive 'option external-check' is not allowed")
+		}
+		if err := policyFilePaths(token, parts); err != nil {
+			return err
 		}
 		if token == "global" {
 			if sawGlobal {
