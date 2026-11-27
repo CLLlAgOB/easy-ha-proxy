@@ -328,14 +328,14 @@ jobs:
           cat dist/SHA256SUMS.go
 
       # Gateways on 1.1.x keep alerts.db the Python alertd wrote: the update to
-      # the agent must keep every event, acknowledgement and mute.
+      # the agent must keep every event, acknowledgement and mute. The fixture
+      # is a real 1.1.3 database (go/agent/internal/contract/testdata), so the
+      # check needs no Python.
       - name: Alert history survives the update from the Python alertd
-        run: |
-          git fetch --no-tags --depth=1 origin refs/tags/v1.1.3:refs/tags/v1.1.3
-          git show v1.1.3:ansible/roles/haproxy-admin/files/easy-ha-proxy-alertd.py > "$RUNNER_TEMP/alertd-1.1.py"
-          python3 .tests/integration/alertd_upgrade_from_python.py \
-            --agent go/agent/dist/easy-ha-proxy-agent-linux-amd64 \
-            --python-alertd "$RUNNER_TEMP/alertd-1.1.py"
+        working-directory: go/agent
+        env:
+          AGENT_BIN: dist/easy-ha-proxy-agent-linux-amd64
+        run: go test -count=1 -run TestAlertdUpgrade ./internal/contract
 
       - name: Scan Go agent binaries (Trivy)
         run: >-

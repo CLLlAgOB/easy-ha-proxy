@@ -1,0 +1,44 @@
+{
+  "alerts": {
+    "site.down|app.example.test": {
+      "rule": "site.down",
+      "subject": "app.example.test",
+      "state": "firing",
+      "severity": "critical",
+      "since_ts": 1795759460,
+      "first_seen_ts": 1795759460,
+      "last_seen_ts": 1795759460,
+      "last_notified_ts": 0,
+      "notify_count": 0,
+      "summary": "Site is down",
+      "detail": "",
+      "trigger_delay": 0,
+      "recipient": "",
+      "acknowledged_ts": 1795759460,
+      "acknowledged_by": "",
+      "muted_until": 1795763060,
+      "stale_since_ts": 0
+    },
+    "backup.failed|nightly": {
+      "rule": "backup.failed",
+      "subject": "nightly",
+      "state": "firing",
+      "severity": "critical",
+      "since_ts": 1795759460,
+      "first_seen_ts": 1795759460,
+      "last_seen_ts": 1795759460,
+      "last_notified_ts": 0,
+      "notify_count": 0,
+      "summary": "Backup job failed",
+      "detail": "",
+      "trigger_delay": null,
+      "recipient": "",
+      "acknowledged_ts": 1795759460,
+      "acknowledged_by": "ops",
+      "muted_until": 0,
+      "stale_since_ts": 0
+    }
+  },
+  "events_before": 2,
+  "muted_until": 1795763060
+}
