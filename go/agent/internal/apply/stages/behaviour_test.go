@@ -303,6 +303,23 @@ func TestTheNativeBundleIsVerified(t *testing.T) {
 	}
 }
 
+// The HTTPS checksum is read for the host arch at build time, not from the
+// _native_arch fact (which a later step sets): otherwise it is always empty
+// and a correctly configured HTTPS release is rejected.
+func TestTheNativeHTTPSChecksumIsReadForTheHostArch(t *testing.T) {
+	checksums := map[string]any{"amd64": strings.Repeat("a", 64), "arm64": strings.Repeat("b", 64)}
+	steps := buildPart(t, "native", &engine.System{}, map[string]any{
+		"ansible_architecture":     "x86_64",
+		"native_release_base_url":  "https://example.test/native",
+		"native_release_checksums": checksums, "native_release_image": ""})
+	err := engine.NewRun(engine.Plan, &engine.System{}, nil).Do("native",
+		pick(t, steps, "native-daemons | Map host architecture to release arch", "native-daemons | Select delivery mode",
+			"native-daemons | Validate configured delivery source"))
+	if err != nil {
+		t.Fatalf("a valid https release with a per-arch checksum was rejected: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Authelia: the host clock is checked before Authelia is deployed (it refuses
 // to start on a clock that is off), and forced into sync where it drifted.

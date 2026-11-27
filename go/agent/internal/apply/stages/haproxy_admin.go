@@ -319,7 +319,10 @@ func adminNative(b *Builder) []engine.Step {
 	pin := b.Bool("{{ native_release_pin_revision | default(true) | bool }}")
 	checksum := ""
 	if mode == "https" {
-		checksum = b.S("{{ native_release_checksums[_native_arch] | default('') }}")
+		// Index by the Go arch computed above, not the _native_arch fact: the
+		// fact step runs later, so rendering _native_arch here would always be
+		// empty and the HTTPS checksum validation would always fail.
+		checksum = b.S("{{ native_release_checksums['" + arch + "'] | default('') }}")
 	}
 	source := b.S("{{ playbook_dir | dirname }}")
 	revision := &engine.Command{Argv: []string{"git", "-c", "safe.directory=" + source, "-C", source, "rev-parse", "HEAD"},

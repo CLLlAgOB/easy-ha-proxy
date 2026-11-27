@@ -3,6 +3,7 @@ package cli
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -400,6 +401,12 @@ func RunPrepareLegacyCLI(args []string, stdout, stderr io.Writer) int {
 	controllerDir := fs.String("controller-dir", "", "path to controller source directory")
 	outputDir := fs.String("output-dir", "", "destination directory for prepared config")
 	if err := fs.Parse(args); err != nil {
+		// --help is a successful probe: install.sh runs `prepare-legacy-config
+		// --help` to decide whether the installed agent can prepare a legacy
+		// snapshot, and a non-zero exit makes it re-fetch the agent every time.
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	if *liveDir == "" || *controllerDir == "" || *outputDir == "" {
