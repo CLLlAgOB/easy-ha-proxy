@@ -195,24 +195,27 @@ func TestTheNamesComeFromASecret(t *testing.T) {
 	}
 }
 
-func TestOnePythonRunsTheContractTests(t *testing.T) {
-	// No gateway runs Python, so no host interpreter has to be covered.
+func TestPythonCoversOnlyTheCompatibilityShims(t *testing.T) {
+	// The contract suite is Go now; Python stays only for the shims the
+	// update broker of releases before 1.2.0 loads mid-update.
 	python := ciJob(t, ciJobs(t), "python")
-	versions := python.Value("strategy").(*pyyaml.Map).Value("matrix").(*pyyaml.Map).Value("python-version").([]any)
-	if len(versions) != 1 || versions[0] != "3.12" {
-		t.Fatalf("python versions %v, want [3.12]", versions)
+	if python.Value("strategy") != nil {
+		t.Fatal("the python job still has a version matrix")
 	}
 	steps := jobRuns(python)
-	mustContain(t, steps, "pip install -r .tests/requirements.txt", "python job")
-	if strings.Contains(steps, "installer") {
-		t.Fatal("the python job covers the installer")
+	mustContain(t, steps, "test_unified_maintenance test_haproxy_package_migration", "python job")
+	if strings.Contains(steps, "unittest discover") {
+		t.Fatal("the python job still discovers the whole suite")
+	}
+	if strings.Contains(steps, "pip install") {
+		t.Fatal("the python job still installs dependencies")
 	}
 }
 
 func TestTheServerStateSmokeRunsTheAgentBuiltHere(t *testing.T) {
 	jobs := ciJobs(t)
 	serverState := ciJob(t, jobs, "server-state")
-	mustContain(t, runOf(ciStep(t, serverState, "Build the agent")), "go build", "server-state/Build")
+	mustContain(t, runOf(ciStep(t, serverState, "Build the agent and the server-state smoke")), "go build", "server-state/Build")
 	mustContain(t, jobRuns(serverState), "--normalizer /usr/local/sbin/easy-ha-proxy-agent", "server-state job")
 }
 

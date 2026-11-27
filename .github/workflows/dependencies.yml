@@ -12,7 +12,6 @@ on:
     paths:
       - '**/requirements.txt'
       - 'ansible/roles/*/defaults/main.yml'
-      - '.github/scripts/pinned_versions.py'
       - 'go/agent/internal/pinnedversions/**'
       - 'go/agent/cmd/pinned-versions/**'
       - '.github/workflows/dependencies.yml'
@@ -21,21 +20,6 @@ permissions:
   contents: read
 
 jobs:
-  audit:
-    name: Known vulnerabilities
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
-        with:
-          python-version: '3.12'
-
-      - name: pip-audit
-        run: |
-          pip install pip-audit==2.7.3
-          pip-audit --progress-spinner off -r .tests/requirements.txt
-
   pinned:
     name: Pinned versions
     runs-on: ubuntu-24.04

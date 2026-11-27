@@ -76,48 +76,22 @@ jobs:
           --normalizer /usr/local/sbin/easy-ha-proxy-agent
 
   python:
-    name: Python ${{ matrix.python-version }}
+    name: Python shim contract tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        # Nothing on a gateway runs Python any more: these are the contract
-        # tests of the templates, the panel's pages and scripts, the shell
-        # entry points and this workflow, so one interpreter is enough.
-        python-version: ['3.12']
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: .tests/requirements.txt
+          python-version: '3.12'
 
-      - name: Install dependencies
-        run: pip install -r .tests/requirements.txt
-
-      # Everything lives in .tests/, so one discovery covers the playbook's
-      # templates and the panel's templates and scripts.
-      - name: Regression tests
-        run: |
-          set -o pipefail
-          python -m unittest discover -s .tests -p 'test_*.py' 2>&1 | tee /tmp/easy-ha-proxy-unittest.log
-
-      - name: Summarize regression failures
-        if: failure()
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-          path = Path('/tmp/easy-ha-proxy-unittest.log')
-          text = path.read_text(errors='replace') if path.exists() else ''
-          blocks = re.findall(r'\n(?:ERROR|FAIL): ([^\n]+)\n-+\n(.*?)(?=\n=+\n|\n-+\nRan |\Z)', text, re.S)
-          for title, detail in blocks[:20]:
-              message = detail[-1800:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-              print(f'::error title={title[:150]}::{message}')
-          PY
+      # The contract suite moved to Go (go/agent/internal/contract). What
+      # stays in Python tests the compatibility shims the update broker of
+      # releases before 1.2.0 loads mid-update; they go when the shims do.
+      - name: Shim regression tests
+        working-directory: .tests
+        run: python -m unittest -v test_unified_maintenance test_haproxy_package_migration
 
   shell:
     name: Shell syntax and ShellCheck

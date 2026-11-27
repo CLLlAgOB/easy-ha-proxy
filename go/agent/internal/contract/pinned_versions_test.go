@@ -128,7 +128,7 @@ func dependabotEntries(t *testing.T) map[[2]string]*pyyaml.Map {
 func TestDependabotTargetsAlphaEverywhere(t *testing.T) {
 	entries := dependabotEntries(t)
 	want := map[[2]string]bool{
-		{"pip", "/.tests"}: true, {"docker", "/go/panel"}: true,
+		{"docker", "/go/panel"}: true,
 		{"github-actions", "/"}: true,
 		{"gomod", "/go/agent"}:  true, {"gomod", "/go/panel"}: true,
 		{"cargo", "/rust/guardd"}: true,
@@ -150,14 +150,6 @@ func TestDependabotTargetsAlphaEverywhere(t *testing.T) {
 
 func TestDependabotOffersOnlyWhatCanBeTaken(t *testing.T) {
 	entries := dependabotEntries(t)
-	// The test ranges move only when a release falls outside them.
-	tests := entries[[2]string{"pip", "/.tests"}]
-	if tests.Value("versioning-strategy") != "increase-if-necessary" {
-		t.Error("the pip entry does not increase-if-necessary")
-	}
-	if strings.Contains(read(t, ".tests/requirements.txt"), "ansible-core") {
-		t.Error("the test requirements hold ansible-core")
-	}
 	// Nothing for a gateway: the installer is the host agent.
 	if regexp.MustCompile(`(?m)^[^#\s]`).MatchString(read(t, "installer/requirements.txt")) {
 		t.Error("installer/requirements.txt holds a requirement")
@@ -180,22 +172,15 @@ func TestTheWeeklyJobWritesIssuesAndNothingElse(t *testing.T) {
 	if perms.Len() != 1 || perms.Value("contents") != "read" {
 		t.Errorf("workflow permissions %v", perms)
 	}
-	pinned := workflow.Value("jobs").(*pyyaml.Map).Value("pinned").(*pyyaml.Map)
+	jobs := workflow.Value("jobs").(*pyyaml.Map)
+	pinned := jobs.Value("pinned").(*pyyaml.Map)
 	pinnedPerms := pinned.Value("permissions").(*pyyaml.Map)
 	if pinnedPerms.Len() != 2 || pinnedPerms.Value("contents") != "read" || pinnedPerms.Value("issues") != "write" {
 		t.Errorf("pinned permissions %v", pinnedPerms)
 	}
-	var audit []string
-	steps, _ := workflow.Value("jobs").(*pyyaml.Map).Value("audit").(*pyyaml.Map).Value("steps").([]any)
-	for _, s := range steps {
-		if step, ok := s.(*pyyaml.Map); ok {
-			run, _ := step.Value("run").(string)
-			audit = append(audit, run)
-		}
-	}
-	joined := strings.Join(audit, "\n")
-	mustContain(t, joined, "pip-audit", "audit job")
-	if strings.Contains(joined, "--ignore-vuln") {
-		t.Error("the audit ignores a vulnerability")
+	// The Python test dependencies are gone, so there is nothing to pip-audit;
+	// Go and Rust vulnerabilities are scanned in CI.
+	if jobs.Value("audit") != nil {
+		t.Error("the dependencies workflow still runs a pip audit")
 	}
 }

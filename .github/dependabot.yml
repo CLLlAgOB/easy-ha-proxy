@@ -5,19 +5,6 @@
 # readable here; the "Dependencies" workflow watches those.
 version: 2
 updates:
-  # Ranges of what the contract tests import (nothing on a gateway runs
-  # Python): a release the range already allows needs no pull request, so
-  # the range only moves when a release falls outside it.
-  - package-ecosystem: pip
-    directory: /.tests
-    target-branch: alpha
-    schedule:
-      interval: weekly
-    versioning-strategy: increase-if-necessary
-    groups:
-      tests:
-        update-types: [minor, patch]
-
   - package-ecosystem: docker
     directory: /go/panel
     target-branch: alpha

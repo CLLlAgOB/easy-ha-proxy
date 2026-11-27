@@ -22,15 +22,10 @@ var englishScanned = []string{"ansible/roles", "go/panel/web", "installer", ".te
 // quotesRussian are the files whose comments quote a mistranslation or a
 // Russian page on purpose: the point of them is the Russian text.
 var quotesRussian = map[string]bool{
-	".tests/js/i18n.test.js":                       true,
-	".tests/test_backup_schedule_page.py":          true,
-	".tests/test_english_source.py":                true,
-	".tests/test_i18n.py":                          true,
-	".tests/test_machine_output_not_translated.py": true,
-	".tests/test_translatable_prose.py":            true,
-	"go/panel/web/static/js/detection_rules.js":    true,
-	"go/panel/web/templates/detection_rules.html":  true,
-	"go/panel/web/templates/haproxy_certs.html":    true,
+	".tests/js/i18n.test.js":                      true,
+	"go/panel/web/static/js/detection_rules.js":   true,
+	"go/panel/web/templates/detection_rules.html": true,
+	"go/panel/web/templates/haproxy_certs.html":   true,
 }
 
 var templateComment = regexp.MustCompile(`(?s)\{#.*?#\}|<!--.*?-->`)
@@ -282,9 +277,7 @@ func TestTheQuotingFilesStillQuote(t *testing.T) {
 	// A file that no longer needs its exemption should lose it.
 	var names []string
 	for rel := range quotesRussian {
-		if rel != ".tests/test_english_source.py" {
-			names = append(names, rel)
-		}
+		names = append(names, rel)
 	}
 	sort.Strings(names)
 	for _, rel := range names {
