@@ -114,3 +114,26 @@ func TestMigrateDomainAndPromoteProductionPlanOnly(t *testing.T) {
 		t.Fatal("plan-only modified original vars.yml")
 	}
 }
+
+func TestBackupRuntimeUIConfigRefusesSymlink(t *testing.T) {
+	// The runtime config is container-writable: a symlink to a root secret
+	// must not be copied into the migration backup (and restored as root).
+	root := t.TempDir()
+	runtime := filepath.Join(root, "runtime")
+	if err := os.MkdirAll(runtime, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(root, "secrets.yml")
+	if err := os.WriteFile(secret, []byte("token: root-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(runtime, "websites.yml")); err != nil {
+		t.Fatal(err)
+	}
+	old := runtimeHAProxyConfigDir
+	runtimeHAProxyConfigDir = runtime
+	t.Cleanup(func() { runtimeHAProxyConfigDir = old })
+	if err := backupRuntimeUIConfig(filepath.Join(root, "backup")); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("a symlinked runtime config was copied: %v", err)
+	}
+}

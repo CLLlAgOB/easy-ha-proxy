@@ -188,6 +188,9 @@ func backupRuntimeUIConfig(destination string) error {
 	_ = os.Chmod(target, 0o700)
 	for _, name := range []string{"vars.yml", "websites.yml", "tcp.yml", "haproxy.cfg.j2"} {
 		src := filepath.Join(runtimeHAProxyConfigDir, name)
+		if isSymlink(src) {
+			return installerErrorf("Runtime config %s is a symlink; refusing to copy it", src)
+		}
 		if isRegularFile(src) {
 			if err := copyFilePreserve(src, filepath.Join(target, name), 0o600); err != nil {
 				return err
@@ -272,12 +275,15 @@ func CommandMigrateDomain(ctx *Context, args MigrateDomainArgs) error {
 		return installerErrorf("Managed configuration is incomplete: %s", strings.Join(missing, ", "))
 	}
 
+	// Fold the runtime UI edits into the managed config through the runtime
+	// key filter first, then read only the managed files: the runtime files
+	// are writable by the unprivileged panel container, so reading them raw
+	// would let it inject host-owned keys (native delivery, sockets) or a
+	// symlink to a root secret into a migration applied as root.
+	if _, err := SyncRuntimeHAProxyConfigToManaged(ctx.Stdout, directory, ""); err != nil {
+		return err
+	}
 	pickSource := func(name string) string {
-		if name == "vars.yml" || name == "websites.yml" || name == "tcp.yml" {
-			if p := filepath.Join(runtimeHAProxyConfigDir, name); isRegularFile(p) {
-				return p
-			}
-		}
 		return filepath.Join(directory, name)
 	}
 	sourceOrder := []string{"vars.yml", "websites.yml", "tcp.yml", "authelia.yml", "metadata.yml"}
