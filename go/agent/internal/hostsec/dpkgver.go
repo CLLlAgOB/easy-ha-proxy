@@ -420,7 +420,7 @@ var querySecurityPackages = func(distro, codename string) ([]securityPackageRow,
 		return []securityPackageRow{}, nil
 	}
 	allPolicies := map[string][]policyVersion{}
-	const batchSize = 400
+	const batchSize = 100
 	for i := 0; i < len(installed); i += batchSize {
 		end := i + batchSize
 		if end > len(installed) {

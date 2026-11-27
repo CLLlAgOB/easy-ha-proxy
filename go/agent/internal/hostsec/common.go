@@ -29,6 +29,7 @@ const (
 	NativeTimerUnit  = "apt-daily-upgrade.timer"
 	maxJSONBytes     = 1024 * 1024
 	maxTailBytes     = 128 * 1024
+	maxRawBytes      = 32 * 1024 * 1024
 )
 
 // Paths and hooks as vars so tests can redirect them into temp directories.
@@ -240,6 +241,26 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 
 func (t *tailBuffer) String() string { return string(t.buf) }
 
+// fullBuffer captures complete output up to a cap, for data the caller parses
+// (rawOutput). Unlike tailBuffer it keeps the beginning: a truncated tail
+// silently drops the first packages of a large apt-cache policy batch.
+type fullBuffer struct {
+	buf      bytes.Buffer
+	limit    int
+	overflow bool
+}
+
+func (f *fullBuffer) Write(p []byte) (int, error) {
+	if f.buf.Len()+len(p) > f.limit {
+		f.overflow = true
+		if remain := f.limit - f.buf.Len(); remain > 0 {
+			f.buf.Write(p[:remain])
+		}
+		return len(p), nil
+	}
+	return f.buf.Write(p)
+}
+
 type cmdOpts struct {
 	timeout   time.Duration
 	env       map[string]string
@@ -267,8 +288,17 @@ var runCommand = func(argv []string, opts cmdOpts) (int, string, error) {
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	out := &tailBuffer{limit: maxTailBytes}
-	cmd.Stdout = out
-	cmd.Stderr = out
+	var raw fullBuffer
+	if opts.rawOutput {
+		// Data the caller parses needs the complete stdout, not a truncated
+		// tail shared with stderr; stderr stays a bounded diagnostic tail.
+		raw.limit = maxRawBytes
+		cmd.Stdout = &raw
+		cmd.Stderr = out
+	} else {
+		cmd.Stdout = out
+		cmd.Stderr = out
+	}
 	if err := cmd.Start(); err != nil {
 		return 1, "", err
 	}
@@ -296,8 +326,18 @@ var runCommand = func(argv []string, opts cmdOpts) (int, string, error) {
 			return 1, "", waitErr
 		}
 	}
-	raw := out.String()
-	redacted := repoURLRe.ReplaceAllString(raw, "[repository]")
+	if opts.rawOutput {
+		if raw.overflow {
+			return 1, "", secErr("OS security command output exceeded the %d-byte capture limit", maxRawBytes)
+		}
+		full := raw.buf.String()
+		if opts.check && rc != 0 {
+			return rc, full, secErr("OS security command failed: %s", filepath.Base(argv[0]))
+		}
+		return rc, full, nil
+	}
+	tail := out.String()
+	redacted := repoURLRe.ReplaceAllString(tail, "[repository]")
 	if opts.check && rc != 0 {
 		if opts.stdout != nil {
 			_, _ = fmt.Fprintln(opts.stdout, redacted)
@@ -305,9 +345,6 @@ var runCommand = func(argv []string, opts cmdOpts) (int, string, error) {
 			fmt.Println(redacted)
 		}
 		return rc, redacted, secErr("OS security command failed: %s", filepath.Base(argv[0]))
-	}
-	if opts.rawOutput {
-		return rc, raw, nil
 	}
 	return rc, redacted, nil
 }
