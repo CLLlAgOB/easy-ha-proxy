@@ -61,15 +61,19 @@ type pullCase struct {
 
 func runPull(t *testing.T, c pullCase) pullRun {
 	t.Helper()
-	for _, tool := range []string{"bash", "sha256sum"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("needs %s", tool)
-		}
-	}
 	root := t.TempDir()
 	stage, bin := filepath.Join(root, "stage"), filepath.Join(root, "bin")
 	os.MkdirAll(stage, 0o755)
 	os.MkdirAll(bin, 0o755)
+	for _, tool := range []string{"bash", "sha256sum", "sed", "head", "rm", "grep", "cut", "dirname", "mkdir"} {
+		path, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("needs %s", tool)
+		}
+		if err := os.Symlink(path, filepath.Join(bin, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	os.WriteFile(filepath.Join(bin, "docker"), []byte(fakeDockerForPull), 0o755)
 	if c.cosign != "" {
 		os.WriteFile(filepath.Join(bin, "cosign"), []byte(c.cosign), 0o755)
@@ -100,7 +104,7 @@ func runPull(t *testing.T, c pullCase) pullRun {
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	// cosign only from bin, never from the host.
-	cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/local/bin:/usr/bin:/bin", "IMAGES="+images, "CALLS="+calls)
+	cmd.Env = append(os.Environ(), "PATH="+bin, "IMAGES="+images, "CALLS="+calls)
 	run := pullRun{err: cmd.Run(), stderr: stderr.String()}
 	if raw, err := os.ReadFile(calls); err == nil {
 		run.calls = strings.Split(strings.TrimRight(string(raw), "\n"), "\n")

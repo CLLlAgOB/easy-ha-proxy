@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/netpolicy"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
@@ -504,7 +504,6 @@ func (d *Daemon) unmanagedDeliveryHooks() []string {
 }
 
 var (
-	deliveryHostRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 	deliveryUserRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._@\\-]{0,127}$`)
 	controlCharRe  = regexp.MustCompile(`[\x00-\x1f\x7f]`)
 )
@@ -574,11 +573,8 @@ func (d *Daemon) saveCertDelivery(payload map[string]any) (map[string]any, error
 	if host == "" || userName == "" || remotePath == "" {
 		return nil, vErr("host, user and remote path are all required")
 	}
-	if len([]rune(host)) > 253 || strings.HasPrefix(host, "-") {
-		return nil, vErr("host must be a valid hostname or IP address")
-	}
-	if net.ParseIP(strings.Trim(host, "[]")) == nil && !deliveryHostRe.MatchString(host) {
-		return nil, vErr("host must be a valid hostname or IP address")
+	if err := netpolicy.ValidateSSHHost(host); err != nil {
+		return nil, vErr("%v", err)
 	}
 	if !deliveryUserRe.MatchString(userName) {
 		return nil, vErr("user contains unsupported characters")

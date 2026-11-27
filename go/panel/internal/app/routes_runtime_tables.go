@@ -10,9 +10,8 @@ import (
 	"log"
 )
 
-// textResponse is a view returning (text, code): Flask's text/html body.
 func (c *Ctx) textResponse(text string, code int) error {
-	return c.HTML(code, text)
+	return c.Text(code, "text/plain; charset=utf-8", text)
 }
 
 // recordOutcome is _record_outcome: a refusal from HAProxy is a failure even

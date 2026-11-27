@@ -738,10 +738,9 @@ func (e *Engine) finish(phase string) error {
 	if err := e.save(phase); err != nil {
 		return err
 	}
-	if err := e.resume(true); err != nil {
-		e.State["cleanup_warning"] = err.Error()
-		_ = e.save("")
-	} else if err := e.Host.Service("stop", seed+".service"); err != nil {
+	resumeErr := e.resume(true)
+	stopErr := e.Host.Service("stop", seed+".service")
+	if err := errors.Join(resumeErr, stopErr); err != nil {
 		e.State["cleanup_warning"] = err.Error()
 		_ = e.save("")
 	}

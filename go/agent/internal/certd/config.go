@@ -149,7 +149,6 @@ var (
 	deliveryNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 	trashIDRe      = regexp.MustCompile(`^([0-9]{1,12})-[a-f0-9]{12}$`)
 	lineageSuffix  = regexp.MustCompile(`(?:-(?:rsa|ecdsa))?(?:-\d{4})?$`)
-	hookKeyRe      = regexp.MustCompile(`(?im)^\s*(?:pre|post|deploy|renew|manual_auth|manual_cleanup)[_-]hook\s*=`)
 	authenticRe    = regexp.MustCompile(`(?m)^\s*authenticator\s*=\s*([^\s#]+)`)
 )
 
@@ -167,6 +166,7 @@ type Daemon struct {
 	standbyMu    sync.Mutex // _STANDBY_SWITCH_LOCK
 	trashMu      sync.Mutex // TRASH_LOCK
 	deliveryMu   sync.Mutex // delivery target records
+	restoreMu    sync.Mutex
 	alertsClient alertSink
 	plugins      pluginCache // listedDNSPlugins
 }

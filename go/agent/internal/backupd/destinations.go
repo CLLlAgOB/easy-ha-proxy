@@ -23,11 +23,12 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/netpolicy"
 )
 
 var (
 	destinationNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
-	sftpHostRe        = regexp.MustCompile(`^[A-Za-z0-9._:\[\]-]+$`)
 	sftpUserRe        = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$`)
 	bucketRe          = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,62}$`)
 	accessKeyRe       = regexp.MustCompile(`^[A-Za-z0-9/+=_-]{3,128}$`)
@@ -143,16 +144,21 @@ func runCapture(timeout time.Duration, stdin []byte, env []string, name string, 
 
 // scanHostKey asks the far end for its host keys (trust on first use).
 func scanHostKey(host string, port int64) ([]byte, error) {
+	address, err := netpolicy.ResolveSSHHost(host)
+	if err != nil {
+		return nil, bErr("invalid", "%v", err)
+	}
+	alias := netpolicy.SSHKnownHost(host, port)
 	_, out, errb, err := runCapture(15*time.Second, nil, nil, sshKeyscan, "-T", "10", "-p",
-		strconv.FormatInt(port, 10), "-t", "ed25519,ecdsa,rsa", "--", host)
+		strconv.FormatInt(port, 10), "-t", "ed25519,ecdsa,rsa", "--", address)
 	if err != nil {
 		return nil, bErr("upstream", "cannot read the host key: %v", err)
 	}
 	lines := []string{}
 	for _, line := range strings.Split(strings.ToValidUTF8(string(out), "�"), "\n") {
-		line = strings.TrimSuffix(line, "\r")
-		if strings.TrimSpace(line) != "" && !strings.HasPrefix(line, "#") {
-			lines = append(lines, line)
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && !strings.HasPrefix(fields[0], "#") {
+			lines = append(lines, alias+" "+fields[1]+" "+fields[2])
 		}
 	}
 	if len(lines) == 0 {
@@ -409,14 +415,8 @@ func (d *Daemon) saveDestination(req map[string]any) (map[string]any, error) {
 		return d.saveS3Destination(req, name, pathTarget, existing)
 	}
 	host := strings.TrimSpace(pyStr(req["host"]))
-	badHost := host == "" || strings.HasPrefix(host, "-") || len([]rune(host)) > 253 || !sftpHostRe.MatchString(host)
-	for _, r := range host {
-		if unicode.IsSpace(r) || r < 32 || r == 127 {
-			badHost = true
-		}
-	}
-	if badHost {
-		return nil, bErr("invalid", "a host is required")
+	if err := netpolicy.ValidateSSHHost(host); err != nil {
+		return nil, bErr("invalid", "%v", err)
 	}
 	userName := strings.TrimSpace(pyStr(req["user"]))
 	if !sftpUserRe.MatchString(userName) {
@@ -709,14 +709,20 @@ func (d *Daemon) deleteDestination(req map[string]any) (map[string]any, error) {
 	return map[string]any{"ok": true, "deleted": removed}, nil
 }
 
-func (d *Daemon) sftpBaseCommand(record map[string]any, binary string) []string {
+func (d *Daemon) sftpBaseCommand(record map[string]any, binary string) ([]string, error) {
 	name := pyStr(record["name"])
-	cmd := []string{binary,
+	host, port := pyStr(record["host"]), intOr(record["port"], 22)
+	address, err := netpolicy.ResolveSSHHost(host)
+	if err != nil {
+		return nil, bErr("invalid", "%v", err)
+	}
+	cmd := append([]string{binary}, netpolicy.SSHOptions(address, netpolicy.SSHKnownHost(host, port))...)
+	cmd = append(cmd,
 		"-o", "StrictHostKeyChecking=yes",
-		"-o", "UserKnownHostsFile=" + d.destFile(name, ".known_hosts"),
+		"-o", "UserKnownHostsFile="+d.destFile(name, ".known_hosts"),
 		"-o", "IdentitiesOnly=yes",
 		"-o", "ConnectTimeout=20",
-	}
+	)
 	if destinationAuth(record) == "password" {
 		cmd = append(cmd, "-o", "BatchMode=no", "-o", "PubkeyAuthentication=no",
 			"-o", "PreferredAuthentications=password,keyboard-interactive",
@@ -728,7 +734,7 @@ func (d *Daemon) sftpBaseCommand(record map[string]any, binary string) []string 
 	if strings.HasSuffix(binary, "sftp") {
 		flag = "-P"
 	}
-	return append(cmd, flag, strconv.FormatInt(intOr(record["port"], 22), 10))
+	return append(cmd, flag, strconv.FormatInt(port, 10)), nil
 }
 
 func (d *Daemon) askpassPath() string { return filepath.Join(d.Opts.DestinationsDir, ".askpass") }
@@ -789,7 +795,10 @@ func (d *Daemon) runSFTP(record map[string]any, batch string) (procResult, error
 	if err != nil {
 		return procResult{}, err
 	}
-	argv := d.sftpBaseCommand(record, "/usr/bin/sftp")
+	argv, err := d.sftpBaseCommand(record, "/usr/bin/sftp")
+	if err != nil {
+		return procResult{}, err
+	}
 	argv = append(argv, "-b", "-", "--", pyStr(record["user"])+"@"+pyStr(record["host"]))
 	rc, out, errb, err := runCapture(time.Duration(d.Opts.SFTPTimeoutSeconds)*time.Second, []byte(batch), env, argv[0], argv[1:]...)
 	if err != nil {
@@ -803,7 +812,10 @@ func (d *Daemon) runSSH(record map[string]any, remote []string) (procResult, err
 	if err != nil {
 		return procResult{}, err
 	}
-	argv := d.sftpBaseCommand(record, "/usr/bin/ssh")
+	argv, err := d.sftpBaseCommand(record, "/usr/bin/ssh")
+	if err != nil {
+		return procResult{}, err
+	}
 	argv = append(argv, "--", pyStr(record["user"])+"@"+pyStr(record["host"]))
 	argv = append(argv, remote...)
 	rc, out, errb, err := runCapture(time.Duration(d.Opts.SFTPTimeoutSeconds)*time.Second, []byte{}, env, argv[0], argv[1:]...)

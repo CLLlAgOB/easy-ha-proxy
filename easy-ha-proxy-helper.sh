@@ -1230,8 +1230,16 @@ native_installed_revision() {
 }
 
 source_revision_of() {
-  command -v git >/dev/null 2>&1 || return 0
-  git -C "$1" rev-parse HEAD 2>/dev/null || true
+  local source="$1" revision=""
+  if [[ -e "${source}/.git" ]]; then
+    revision="$(git -c "safe.directory=${source}" -C "${source}" rev-parse HEAD 2>/dev/null || true)"
+  fi
+  if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ && -r "${source}/.easy-ha-proxy-source-revision" ]]; then
+    revision="$(awk -F= '$1 == "revision" {print $2; exit}' "${source}/.easy-ha-proxy-source-revision" | tr -d '[:space:]')"
+  fi
+  if [[ "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s\n' "${revision}"
+  fi
 }
 
 # The native binaries are pinned to the commit they were built from, so they
@@ -1466,6 +1474,7 @@ prompt_update_selection() {
   local max="$1"
   local answer=""
   local token=""
+  local -a tokens=()
   local -A seen=()
 
   selected_update_indexes=()
@@ -1488,7 +1497,8 @@ prompt_update_selection() {
       ;;
   esac
 
-  for token in ${answer}; do
+  read -r -a tokens <<<"${answer}"
+  for token in "${tokens[@]}"; do
     if [[ ! "${token}" =~ ^[0-9]+$ ||
           "${token}" -lt 1 ||
           "${token}" -gt "${max}" ]]; then

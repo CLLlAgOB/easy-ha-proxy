@@ -619,7 +619,8 @@ func TestCertificateMailNeedsNoHostMailer(t *testing.T) {
 // The legacy relay spool is migrated under a lock, with the queue checked
 // and Authelia stopped, and anything that goes wrong puts it back.
 func TestTheSpoolMigrationIsLockedQuiescedAndFailsClosed(t *testing.T) {
-	for _, want := range []string{"flock --exclusive --wait 30", `docker stop "{{ authelia_container_name }}"`, "trap recover EXIT",
+	for _, want := range []string{"flock --exclusive --wait 30", `authelia_container={{ authelia_container_name | quote }}`,
+		`docker stop -- "${authelia_container}"`, "trap recover EXIT",
 		"easy-ha-proxy-mail-relay-spool"} {
 		if !strings.Contains(autheliaSpoolMigration, want) {
 			t.Errorf("the spool migration lacks %q", want)

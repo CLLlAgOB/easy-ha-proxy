@@ -443,13 +443,15 @@ func restoreManaged(path string, content []byte, mode os.FileMode) error {
 	if len(content) > 0 {
 		return atomicWriteManaged(path, content, mode)
 	}
-	if _, err := openManagedDir(filepath.Dir(path)); err != nil {
+	dirFD, err := openManagedDir(filepath.Dir(path))
+	if err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	defer syscall.Close(dirFD)
+	if err := unix.Unlinkat(dirFD, filepath.Base(path), 0); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	fsyncPath(filepath.Dir(path))
+	_ = syscall.Fsync(dirFD)
 	return nil
 }
 
@@ -1558,16 +1560,41 @@ func validateGeoIPURL(ctx context.Context, u *url.URL, requireHTTPS bool) error 
 	if host == "" {
 		return gerr("GeoIP URL has no host")
 	}
+	_, err := geoipPublicAddresses(ctx, host)
+	return err
+}
+
+func geoipPublicAddresses(ctx context.Context, host string) ([]netip.Addr, error) {
 	addrs, err := geoipLookupIP(ctx, host)
 	if err != nil || len(addrs) == 0 {
-		return gerr("cannot resolve GeoIP host %q: %v", host, err)
+		return nil, gerr("cannot resolve GeoIP host %q: %v", host, err)
 	}
 	for _, addr := range addrs {
 		if isGeoIPBlockedAddr(addr) {
-			return gerr("GeoIP redirect host %q resolves to disallowed address %s", host, addr)
+			return nil, gerr("GeoIP host %q resolves to disallowed address %s", host, addr)
 		}
 	}
-	return nil
+	return addrs, nil
+}
+
+func dialGeoIP(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	addrs, err := geoipPublicAddresses(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	for _, addr := range addrs {
+		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(addr.Unmap().String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		err = dialErr
+	}
+	return nil, err
 }
 
 func geoipCheckRedirect(req *http.Request, via []*http.Request) error {
@@ -1585,6 +1612,14 @@ func downloadFile(rawURL, dest string, out io.Writer) error {
 	if err != nil {
 		return gerr("download failed for %s: %v", rawURL, err)
 	}
+	transport := geoipHTTPTransport
+	if transport == nil {
+		pinned := http.DefaultTransport.(*http.Transport).Clone()
+		pinned.Proxy = nil
+		pinned.DialContext = dialGeoIP
+		defer pinned.CloseIdleConnections()
+		transport = pinned
+	}
 	var last error
 	for attempt := 1; attempt <= 3; attempt++ {
 		err := func() error {
@@ -1600,7 +1635,7 @@ func downloadFile(rawURL, dest string, out io.Writer) error {
 			req.Header.Set("User-Agent", "easy-ha-proxy-geoip-updater/1")
 			client := &http.Client{
 				Timeout:       60 * time.Second,
-				Transport:     geoipHTTPTransport,
+				Transport:     transport,
 				CheckRedirect: geoipCheckRedirect,
 			}
 			resp, err := client.Do(req)

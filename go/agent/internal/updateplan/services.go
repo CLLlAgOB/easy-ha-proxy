@@ -295,7 +295,7 @@ func probeDaemons(sourceDir string, o daemonOptions) M {
 }
 
 func probeOS(runner Runner, freshness M, excluded map[string]bool) M {
-	result := runner.Run([]string{"apt-get", "-s", "upgrade"}, aptTimeout)
+	result := runner.Run([]string{"apt-get", "-s", "upgrade", "--with-new-pkgs"}, aptTimeout)
 	if result.Returncode != 0 {
 		state := "unknown"
 		if result.Error == "not-found" {

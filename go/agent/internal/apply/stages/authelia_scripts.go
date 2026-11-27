@@ -20,7 +20,8 @@ relay_was_running="$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}
 spool_name="$(docker inspect --format '{{ '{{' }}range .Mounts{{ '}}' }}{{ '{{' }}if eq .Destination "/var/spool/postfix"{{ '}}' }}{{ '{{' }}.Name{{ '}}' }}{{ '{{' }}end{{ '}}' }}{{ '{{' }}end{{ '}}' }}' mail_relay)"
 [ "${spool_name}" != easy-ha-proxy-mail-relay-spool ] || exit 0
 
-authelia_was_running="$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' "{{ authelia_container_name }}")"
+authelia_container={{ authelia_container_name | quote }}
+authelia_was_running="$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' -- "${authelia_container}")"
 migrated=no
 
 recover() {
@@ -35,8 +36,8 @@ recover() {
     docker stop mail_relay >/dev/null 2>&1 || true
   fi
   if [ "${authelia_was_running}" = true ]; then
-    docker start "{{ authelia_container_name }}" >/dev/null 2>&1 || recovery_failed=yes
-    [ "$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' "{{ authelia_container_name }}" 2>/dev/null)" = true ] || recovery_failed=yes
+    docker start -- "${authelia_container}" >/dev/null 2>&1 || recovery_failed=yes
+    [ "$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' -- "${authelia_container}" 2>/dev/null)" = true ] || recovery_failed=yes
   fi
   [ "${recovery_failed}" = no ] || exit 90
   exit "${rc}"
@@ -49,7 +50,7 @@ fi
 docker exec --env LC_ALL=C mail_relay postqueue -p 2>/dev/null | grep -Fq 'Mail queue is empty'
 
 if [ "${authelia_was_running}" = true ]; then
-  docker stop "{{ authelia_container_name }}" >/dev/null
+  docker stop -- "${authelia_container}" >/dev/null
 fi
 docker exec --env LC_ALL=C mail_relay postqueue -p 2>/dev/null | grep -Fq 'Mail queue is empty'
 
@@ -70,8 +71,8 @@ done
 [ "${ready}" = yes ]
 
 if [ "${authelia_was_running}" = true ]; then
-  docker start "{{ authelia_container_name }}" >/dev/null
-  [ "$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' "{{ authelia_container_name }}")" = true ]
+  docker start -- "${authelia_container}" >/dev/null
+  [ "$(docker inspect --format '{{ '{{' }}.State.Running{{ '}}' }}' -- "${authelia_container}")" = true ]
 fi
 if [ "${relay_was_running}" != true ] && [ "{{ ((mail_notify_enabled | default(false) | bool) or (mail_relay_server | default(false) | bool)) | ternary('true', 'false') }}" != true ]; then
   docker stop mail_relay >/dev/null

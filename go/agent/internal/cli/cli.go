@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,16 @@ func RunCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "--probe":
 		return 0
+	case "--revision":
+		if info, ok := debug.ReadBuildInfo(); ok {
+			for _, setting := range info.Settings {
+				if setting.Key == "vcs.revision" && sourceRevisionRe.MatchString(setting.Value) {
+					fmt.Fprintln(stdout, setting.Value)
+					return 0
+				}
+			}
+		}
+		return 1
 	case "-h", "--help":
 		fmt.Fprint(stdout, rootUsage)
 		return 0

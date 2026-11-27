@@ -110,7 +110,19 @@ func pyB64DecodeStrict(s string) ([]byte, error) {
 	return raw, nil
 }
 
-func controldRaw(command string, timeout time.Duration, chunk int) ([]byte, error) {
+func readControldReply(reader io.Reader) ([]byte, error) {
+	const maxReply = 32 * 1024 * 1024
+	raw, err := io.ReadAll(io.LimitReader(reader, maxReply+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxReply {
+		return nil, errors.New("haproxy-controld response is too large")
+	}
+	return raw, nil
+}
+
+func controldRaw(command string, timeout time.Duration) ([]byte, error) {
 	conn, err := net.DialTimeout("unix", haproxyControlSocket, timeout)
 	if err != nil {
 		return nil, err
@@ -120,19 +132,7 @@ func controldRaw(command string, timeout time.Duration, chunk int) ([]byte, erro
 	if _, err := conn.Write([]byte(command + "\n")); err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	b := make([]byte, chunk)
-	for {
-		n, err := conn.Read(b)
-		buf.Write(b[:n])
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-	return buf.Bytes(), nil
+	return readControldReply(conn)
 }
 
 // controldJSONRequest is _controld_json_request.
@@ -149,7 +149,7 @@ func controldJSONRequest(command string, timeout int) *Map {
 			return fail("haproxy-controld request failed: 'ascii' codec can't encode character")
 		}
 	}
-	raw, err := controldRaw(command, time.Duration(timeout)*time.Second, 65536)
+	raw, err := controldRaw(command, time.Duration(timeout)*time.Second)
 	if err != nil {
 		return fail("haproxy-controld request failed: " + pyOSError(err))
 	}
@@ -301,7 +301,7 @@ func checkCfgViaControld(cfgText string) (int, string, string, bool) {
 		return 0, "", "", false
 	}
 	payload := base64.StdEncoding.EncodeToString([]byte(cfgText))
-	raw, err := controldRaw("check-config "+payload, time.Duration(haproxyControlTimeout)*time.Second, 4096)
+	raw, err := controldRaw("check-config "+payload, time.Duration(haproxyControlTimeout)*time.Second)
 	if err != nil {
 		return 0, "", "", false
 	}
@@ -1032,7 +1032,7 @@ func UDPListenPortConflict(start, end int64) string {
 	if haproxyControlSocket == "" || !fileExists(haproxyControlSocket) {
 		return ""
 	}
-	raw, err := controldRaw(fmt.Sprintf("udp-port-check %d %d", start, end), time.Duration(haproxyControlTimeout)*time.Second, 4096)
+	raw, err := controldRaw(fmt.Sprintf("udp-port-check %d %d", start, end), time.Duration(haproxyControlTimeout)*time.Second)
 	if err != nil {
 		return ""
 	}

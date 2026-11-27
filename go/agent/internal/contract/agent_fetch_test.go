@@ -31,7 +31,7 @@ out="" url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
-    -*) case "$1" in --retry|--connect-timeout) shift ;; esac; shift ;;
+    -*) case "$1" in --proto|--proto-redir|--retry|--connect-timeout|--max-time) shift ;; esac; shift ;;
     *) url="$1"; shift ;;
   esac
 done
@@ -224,6 +224,65 @@ func TestABinaryThatDoesNotMatchItsChecksumIsNotInstalled(t *testing.T) {
 		if _, err := os.Lstat(f.destination); !os.IsNotExist(err) {
 			t.Errorf("%s: the agent was installed", checksum)
 		}
+	}
+}
+
+func TestAgentFetchUsesConfiguredHTTPSBundleChecksum(t *testing.T) {
+	f := newFetchFixture(t)
+	f.writeBundle([][2]string{{"sbin/easy-ha-proxy-agent", string(fetchAgent)}})
+	name := "easy-ha-proxy-native-linux-amd64.tar.gz"
+	archive, err := os.ReadFile(filepath.Join(f.root, "bundles", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.release, name), archive, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checksum := sha256.Sum256(archive)
+	vars := "native_release_base_url: https://releases.example.test/native\nnative_release_checksums:\n  amd64: '" + hex.EncodeToString(checksum[:]) + "'\n"
+	if err := os.WriteFile(filepath.Join(f.config, "vars.yml"), []byte(vars), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := f.fetch()
+	if result.code != 0 {
+		t.Fatalf("rc %d: %s", result.code, result.stderr)
+	}
+	if calls := f.curlCalls(); len(calls) != 1 || !strings.HasSuffix(calls[0], "/native/"+name) {
+		t.Fatalf("curl: %v", calls)
+	}
+	if binary, err := os.ReadFile(f.destination); err != nil || !bytes.Equal(binary, fetchAgent) {
+		t.Fatalf("agent = %q, %v", binary, err)
+	}
+}
+
+func TestAgentFetchRequiresSignatureBeforeDockerExtraction(t *testing.T) {
+	f := newFetchFixture(t)
+	ref := "clllagob/haproxy-admin-ui@sha256:" + strings.Repeat("1", 64)
+	docker := `#!/bin/sh
+case "$1:$2" in
+  pull:--) ;;
+  image:inspect) printf '%s\n' '` + ref + `' ;;
+  *) echo "unexpected Docker extraction" >> "$CALLS"; exit 1 ;;
+esac
+`
+	cosign := `#!/bin/sh
+printf '%s\n' "$*" >> "$CALLS"
+exit 1
+`
+	for name, body := range map[string]string{"docker": docker, "cosign": cosign} {
+		if err := os.WriteFile(filepath.Join(f.bin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(f.config, "vars.yml"), []byte("'native_release_verify_signature': true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := f.fetch()
+	if result.code == 0 {
+		t.Fatal("installed agent after signature verification failed")
+	}
+	if calls := f.curlCalls(); len(calls) != 1 || !strings.HasSuffix(calls[0], " -- "+ref) {
+		t.Fatalf("expected only verification of the immutable OCI digest, got %v", calls)
 	}
 }
 

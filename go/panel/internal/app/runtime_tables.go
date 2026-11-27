@@ -561,9 +561,11 @@ var ipv4DottedRe = regexp.MustCompile(`^\d{1,3}(?:\.\d{1,3}){3}$`)
 
 // unbanIP is unban_ip: (text, status).
 func unbanIP(ip string) (string, int, error) {
-	if !ipv4DottedRe.MatchString(ip) {
+	addr, ok := pyIPAddress(ip)
+	if !ok || addr.Zone() != "" {
 		return "Invalid IP", 400, nil
 	}
+	ip = addr.Unmap().String()
 	engineNote := ""
 	answer, err := guarddForgetBan(ip)
 	if err != nil {

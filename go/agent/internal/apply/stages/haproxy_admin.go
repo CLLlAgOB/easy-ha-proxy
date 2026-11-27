@@ -325,7 +325,8 @@ func adminNative(b *Builder) []engine.Step {
 		checksum = b.S("{{ native_release_checksums['" + arch + "'] | default('') }}")
 	}
 	source := b.S("{{ playbook_dir | dirname }}")
-	revision := &engine.Command{Argv: []string{"git", "-c", "safe.directory=" + source, "-C", source, "rev-parse", "HEAD"},
+	revision := &engine.Command{Argv: []string{"/bin/bash", "-c",
+		`source "$1/installer/agent-fetch.sh" && easy_ha_proxy_source_revision "$1"`, "source-revision", source},
 		Probe: true, IgnoreErrors: true}
 	agentDest := b.S("{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}")
 	guarddDest := b.S("{{ native_guardd_bin | default('/usr/local/sbin/guardd-core') }}")

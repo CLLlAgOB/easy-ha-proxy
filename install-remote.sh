@@ -598,6 +598,7 @@ target="${ssh_host}"
 if [[ -n "${ssh_user}" ]]; then
   target="${ssh_user}@${ssh_host}"
 fi
+[[ "${ssh_host}" != -* && "${ssh_user}" != -* ]] || die "Invalid SSH destination: ${target}"
 
 if [[ "${dry_run}" == true ]]; then
   printf '[%s] Target: %s\n' "${product}" "${target}"
@@ -707,6 +708,7 @@ prepare_remote_reboot_monitoring() {
     -o "ControlPath=none"
   )
   [[ -n "${identity_file}" ]] && reboot_probe_options+=(-i "${identity_file}")
+  reboot_probe_options+=(--)
 
   [[ "${ask_pass}" != true ]] || return 0
   if reboot_monitor_boot_id="$(
@@ -739,7 +741,7 @@ wait_for_remote_reboot() {
     return 0
   fi
 
-  ssh -S "${control_path}" -O exit "${target}" </dev/null >/dev/null 2>&1 || true
+  ssh -S "${control_path}" -O exit -- "${target}" </dev/null >/dev/null 2>&1 || true
   if [[ "${language}" == "ru" ]]; then
     printf '[%s] Ожидаю перезагрузку и смену boot_id сервера...\n' "${product}"
   else
@@ -787,7 +789,7 @@ cleanup() {
     remote_cleanup_as_root \
       "rm -f ${staged_remote_export} ${staged_remote_export}.sha256"
   fi
-  ssh -S "${control_path}" -O exit "${target}" </dev/null >/dev/null 2>&1 || true
+  ssh -S "${control_path}" -O exit -- "${target}" </dev/null >/dev/null 2>&1 || true
   rm -f \
     "${temporary_source_archive}" \
     "${temporary_config_archive}"
@@ -831,6 +833,8 @@ if [[ "${ask_pass}" == true ]]; then
   ssh_options+=("${password_options[@]}")
   scp_options+=("${password_options[@]}")
 fi
+ssh_options+=(--)
+scp_options+=(--)
 
 controller_source_root="${source_root:-${script_dir}}"
 case "${remote_action}" in
@@ -1279,8 +1283,8 @@ if [[ -n "${snapshot_path}" && "${fetch_snapshot}" == true ]]; then
   local_export="${local_snapshot_dir}/legacy-export.tgz"
   staged_remote_export="${remote_stage_dir}/${snapshot_name}-export.tgz"
 
-  install -d -m 0700 "${local_snapshot_root}" "${local_snapshot_dir}"
-  chmod 0700 "${local_snapshot_root}" "${local_snapshot_dir}"
+  install -d -m 0700 "${local_snapshot_root}"
+  mkdir -m 0700 -- "${local_snapshot_dir}" || die "Cannot create snapshot directory: ${local_snapshot_dir}"
   printf '[%s] Preparing protected snapshot export on %s\n' \
     "${product}" "${target}"
   export_script="umask 077; tar -C ${snapshot_path} -czf ${staged_remote_export} "
@@ -1302,7 +1306,12 @@ if [[ -n "${snapshot_path}" && "${fetch_snapshot}" == true ]]; then
     "rm -f ${staged_remote_export}" </dev/null || true
   staged_remote_export=""
 
-  tar -xzf "${local_export}" -C "${local_snapshot_dir}"
+  (
+    umask 077
+    for member in live-config.tar.gz SHA256SUMS manifest.txt; do
+      tar -xOzf "${local_export}" -- "${member}" >"${local_snapshot_dir}/${member}" || exit 1
+    done
+  ) || die 'Cannot extract the downloaded snapshot envelope.'
   expected_hash="$(
     awk 'NR == 1 { print $1 }' "${local_snapshot_dir}/SHA256SUMS"
   )"
@@ -1317,8 +1326,20 @@ if [[ -n "${snapshot_path}" && "${fetch_snapshot}" == true ]]; then
   live_dir="${local_snapshot_dir}/live"
   [[ ! -e "${live_dir}" ]] ||
     die "Refusing to overwrite existing extracted snapshot: ${live_dir}"
-  install -d -m 0700 "${live_dir}"
-  tar -xzf "${local_snapshot_dir}/live-config.tar.gz" -C "${live_dir}"
+  mkdir -m 0700 -- "${live_dir}"
+  # GNU tar passes only regular file contents to this fixed command. Create
+  # their parent directories locally, keeping archive metadata in the bundle.
+  SNAPSHOT_DEST="${live_dir}" tar -xzf "${local_snapshot_dir}/live-config.tar.gz" --to-command='
+    set -eC
+    umask 077
+    member=${TAR_FILENAME#./}
+    case "/${member}/" in
+      //*|*/../*|*/./*|*//*) exit 1 ;;
+    esac
+    path=${SNAPSHOT_DEST}/${member}
+    mkdir -p -- "$(dirname -- "${path}")"
+    cat >"${path}"
+  ' || die 'Cannot extract regular files from the downloaded snapshot.'
   printf '[%s] Snapshot verified and extracted: %s\n' \
     "${product}" "${live_dir}"
 elif [[ -n "${snapshot_path}" ]]; then

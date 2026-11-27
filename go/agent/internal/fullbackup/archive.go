@@ -84,6 +84,12 @@ func eachMember(p string, visit func(h *tar.Header, pax map[string]string, body 
 		}
 		if h.Typeflag == tar.TypeXGlobalHeader {
 			for k, v := range h.PAXRecords {
+				// A global record can change the paths and metadata GNU tar
+				// extracts without changing the Header returned by Go's reader.
+				switch k {
+				case "path", "linkpath", "uid", "gid", "size", "GNU.sparse.name":
+					return backupErrorf("Unsafe global PAX field: %s", k)
+				}
 				global[k] = v
 			}
 			continue
@@ -156,37 +162,82 @@ func rejectPrivilegedPayloadAttributes(h *tar.Header, pax map[string]string) err
 	return nil
 }
 
-func coreMemberPolicy(h *tar.Header, name string, pax map[string]string) error {
+func validatePayloadMetadata(h *tar.Header, pax map[string]string, ancestor bool) error {
 	if err := rejectPrivilegedPayloadAttributes(h, pax); err != nil {
 		return err
 	}
-	p := "/" + strings.TrimLeft(name, "/")
-	allowed := corePayloadPathAllowed(p)
-	if h.Typeflag == tar.TypeDir {
-		allowed = allowed || coreAncestorDirectoryAllowed(p)
+	if ancestor {
+		if h.Uid != 0 || h.Gid != 0 || h.Mode&0o022 != 0 {
+			return backupErrorf("Unsafe ownership or mode on payload ancestor directory: %s", h.Name)
+		}
+		for key := range pax {
+			if strings.HasPrefix(key, "SCHILY.acl.") || strings.HasPrefix(key, "SCHILY.xattr.") {
+				return backupErrorf("Unsafe ACL or xattr on payload ancestor directory: %s", h.Name)
+			}
+		}
 	}
-	if !allowed {
+	return nil
+}
+
+func preservedPayloadPolicy(preserved []string, h *tar.Header, name string) error {
+	p := "/" + name
+	if pathIsPreserved(p, preserved) {
+		// Older backups include parts of the broker state. Keep accepting
+		// the spellings the literal extraction exclusions cover.
+		raw := strings.TrimPrefix(h.Name, "./")
+		if h.Typeflag == tar.TypeDir {
+			raw = strings.TrimSuffix(raw, "/")
+		}
+		if raw != name {
+			return backupErrorf("Noncanonical preserved payload member: %s", h.Name)
+		}
+	}
+	if h.Typeflag != tar.TypeDir && hasPreservedDescendant(p, preserved) {
+		return backupErrorf("Payload member would replace a preserved path's parent: %s", name)
+	}
+	if target := resolvedLinkName(h); target != "" && pathIsPreserved("/"+target, preserved) {
+		return backupErrorf("Payload link targets a preserved path: %s", name)
+	}
+	return nil
+}
+
+func preservePayloadPaths(policy memberPolicy) memberPolicy {
+	preserved := effectiveRestorePreservedPaths()
+	return func(h *tar.Header, name string, pax map[string]string) error {
+		if err := preservedPayloadPolicy(preserved, h, name); err != nil {
+			return err
+		}
+		return policy(h, name, pax)
+	}
+}
+
+func coreMemberPolicy(h *tar.Header, name string, pax map[string]string) error {
+	p := "/" + name
+	managed := corePayloadPathAllowed(p)
+	ancestor := !managed && h.Typeflag == tar.TypeDir && coreAncestorDirectoryAllowed(p)
+	if !managed && !ancestor {
 		return backupErrorf("Core payload member is outside managed paths: %s", name)
 	}
-	if target := resolvedLinkName(h); target != "" && !corePayloadPathAllowed("/"+strings.TrimLeft(target, "/")) {
+	if err := validatePayloadMetadata(h, pax, ancestor); err != nil {
+		return err
+	}
+	if target := resolvedLinkName(h); target != "" && !corePayloadPathAllowed("/"+target) {
 		return backupErrorf("Core payload link target is outside managed paths: %s", name)
 	}
 	return nil
 }
 
 func sshMemberPolicy(h *tar.Header, name string, pax map[string]string) error {
-	if err := rejectPrivilegedPayloadAttributes(h, pax); err != nil {
-		return err
-	}
-	p := "/" + strings.TrimLeft(name, "/")
-	allowed := sshPayloadPathAllowed(p)
-	if h.Typeflag == tar.TypeDir {
-		allowed = allowed || sshAncestorDirectoryAllowed(p)
-	}
-	if !allowed {
+	p := "/" + name
+	managed := sshPayloadPathAllowed(p)
+	ancestor := !managed && h.Typeflag == tar.TypeDir && sshAncestorDirectoryAllowed(p)
+	if !managed && !ancestor {
 		return backupErrorf("SSH payload member is outside allowed paths: %s", name)
 	}
-	if target := resolvedLinkName(h); target != "" && !sshPayloadPathAllowed("/"+strings.TrimLeft(target, "/")) {
+	if err := validatePayloadMetadata(h, pax, ancestor); err != nil {
+		return err
+	}
+	if target := resolvedLinkName(h); target != "" && !sshPayloadPathAllowed("/"+target) {
 		return backupErrorf("SSH payload link target is outside allowed paths: %s", name)
 	}
 	return nil
@@ -247,10 +298,10 @@ func extractBundle(bundle, destination string) error {
 
 func validatePayload(p string, ssh bool) (int64, error) {
 	if ssh {
-		_, expanded, err := validateArchiveMembers(p, "SSH payload", limit.sshMembers, limit.sshBytes, sshMemberPolicy)
+		_, expanded, err := validateArchiveMembers(p, "SSH payload", limit.sshMembers, limit.sshBytes, preservePayloadPaths(sshMemberPolicy))
 		return expanded, err
 	}
-	_, expanded, err := validateArchiveMembers(p, "core payload", limit.coreMembers, limit.coreBytes, coreMemberPolicy)
+	_, expanded, err := validateArchiveMembers(p, "core payload", limit.coreMembers, limit.coreBytes, preservePayloadPaths(coreMemberPolicy))
 	return expanded, err
 }
 
@@ -272,7 +323,7 @@ var validateRollbackPayload = func(p string, includeSSH bool) error {
 		return coreErr
 	}
 	_, _, err := validateArchiveMembers(p, "rollback payload", limit.coreMembers+limit.sshMembers,
-		limit.coreBytes+limit.sshBytes, policy)
+		limit.coreBytes+limit.sshBytes, preservePayloadPaths(policy))
 	return err
 }
 
@@ -316,51 +367,59 @@ func createPayload(destination string, paths, excludes []string) ([]string, erro
 	return warnings, nil
 }
 
-// extractPayload extracts over "/"; with members, only those (and what is
-// below them). Full extractions preserve host broker/control-plane subtrees
+// extractPayload extracts over "/"; with members, it extracts those exact
+// entries. All extractions preserve host broker/control-plane subtrees
 // (such as backup-web) so a live web restore cannot overwrite its own job
 // files or recovery source.
 var extractPayload = func(payload string, members []string) error {
-	argv := []string{"tar", "--acls", "--xattrs", "--xattrs-exclude=security.*", "--numeric-owner", "-xzpf", payload, "-C", "/"}
-	if len(members) == 0 {
-		for _, rel := range relativePaths(effectiveRestorePreservedPaths()) {
-			argv = append(argv, "--exclude="+rel, "--exclude=./"+rel)
+	argv := []string{"tar", "--acls", "--xattrs", "--xattrs-exclude=security.*", "--numeric-owner", "--no-overwrite-dir", "-xzpf", payload, "-C", "/", "--anchored", "--no-wildcards"}
+	for _, rel := range relativePaths(effectiveRestorePreservedPaths()) {
+		if rel == "" {
+			return backupErrorf("Cannot extract a payload when the entire filesystem is preserved")
 		}
+		argv = append(argv, "--exclude="+rel, "--exclude=./"+rel)
 	}
-	argv = append(argv, members...)
+	if len(members) > 0 {
+		list, err := os.CreateTemp(filepath.Dir(payload), ".config-members-*")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(list.Name())
+		_, writeErr := io.WriteString(list, strings.Join(members, "\x00")+"\x00")
+		if err := errors.Join(writeErr, list.Close()); err != nil {
+			return err
+		}
+		argv = append(argv, "--no-recursion", "--null", "-T", list.Name())
+	}
 	_, err := run(argv, runOptions{check: true})
 	return err
 }
 
-func listPayloadMembers(payload string) ([]string, error) {
-	result, err := run([]string{"tar", "-tzf", payload}, runOptions{check: true, capture: true})
-	if err != nil {
-		return nil, err
-	}
-	var members []string
-	for _, line := range splitLines(result.Stdout) {
-		if line = strings.TrimSpace(line); line != "" {
-			members = append(members, line)
-		}
-	}
-	return members, nil
-}
-
-// configScopeMembers is the archive member prefixes the configuration scope covers.
+// configScopeMembers keeps the original names so tar can select both bare
+// and ./-prefixed entries without extracting anything else recursively.
 var configScopeMembers = func(payload string) ([]string, error) {
-	members, err := listPayloadMembers(payload)
-	if err != nil {
-		return nil, err
-	}
-	selected := map[string]bool{}
-	for _, member := range members {
-		name := strings.TrimRight(strings.TrimLeft(member, "./"), "/")
+	preserved := effectiveRestorePreservedPaths()
+	selectedPath := func(name string) bool {
+		if pathIsPreserved(name, preserved) {
+			return false
+		}
 		for _, root := range configScopePaths {
-			prefix := strings.TrimLeft(root, "/")
-			if name == prefix || strings.HasPrefix(name, prefix+"/") {
-				selected[prefix] = true
+			if isSameOrBelow(name, root) {
+				return true
 			}
 		}
+		return false
 	}
-	return sortedKeys(selected), nil
+	var members []string
+	err := eachMember(payload, func(h *tar.Header, _ map[string]string, _ io.Reader) error {
+		if !selectedPath("/" + pyNormpath(h.Name)) {
+			return nil
+		}
+		if target := resolvedLinkName(h); target != "" && !selectedPath("/"+target) {
+			return backupErrorf("Configuration payload link crosses the restore scope: %s", h.Name)
+		}
+		members = append(members, h.Name)
+		return nil
+	})
+	return members, err
 }

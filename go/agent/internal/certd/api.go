@@ -7,11 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -29,6 +27,7 @@ func NewDaemon(opts Options) *Daemon {
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload map[string]any) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Minute))
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -232,6 +231,12 @@ func (d *Daemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]any{"ok": false, "error": "unknown path"})
 	case http.MethodPost:
 		switch path {
+		case "/api/v1/certs/restore":
+			if !d.restoreMu.TryLock() {
+				writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "a certificate restore is already running"})
+				return
+			}
+			defer d.restoreMu.Unlock()
 		case "/api/v1/certs/upload", "/api/v1/certs/ca/upload", "/api/v1/certs/inspect", "/api/v1/certs/import":
 			d.handleMultipart(w, r, path)
 			return
@@ -527,35 +532,19 @@ func Run(opts Options) error {
 	if _, err := d.rebuildClientAuthMaterial(startup); err != nil {
 		log.Printf("cannot prepare client authentication material: %v", err)
 	}
-	if exists(opts.SocketPath) {
-		if err := os.Remove(opts.SocketPath); err != nil {
-			log.Printf("Failed to unlink old socket %s: %v", opts.SocketPath, err)
-		}
-	}
-	_ = os.MkdirAll(filepath.Dir(opts.SocketPath), 0o750)
-	ln, err := net.Listen("unix", opts.SocketPath)
+	ln, err := unixrpc.ListenUnix(opts.SocketPath, "", opts.GroupName, 0o660)
 	if err != nil {
 		return err
-	}
-	if g, err := user.LookupGroup(opts.GroupName); err == nil {
-		gid, _ := strconv.Atoi(g.Gid)
-		if err := os.Chown(opts.SocketPath, 0, gid); err != nil {
-			log.Printf("Failed to set socket ownership on %s: %v", opts.SocketPath, err)
-		}
-	} else {
-		log.Printf("Failed to set socket ownership on %s: %v", opts.SocketPath, err)
-	}
-	if err := os.Chmod(opts.SocketPath, 0o660); err != nil {
-		log.Printf("Failed to set socket permissions on %s: %v", opts.SocketPath, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go d.expiryWatch(ctx)
 	go d.trashPurgeLoop(ctx)
-	srv := &http.Server{Handler: d, ReadHeaderTimeout: requestTimeoutSeconds * time.Second, IdleTimeout: requestTimeoutSeconds * time.Second}
+	srv := &http.Server{Handler: d, ReadHeaderTimeout: requestTimeoutSeconds * time.Second,
+		ReadTimeout: 2 * time.Minute, IdleTimeout: requestTimeoutSeconds * time.Second}
 	serveCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	log.Printf("haproxy-certd is listening on unix://%s", opts.SocketPath)
 	defer os.Remove(opts.SocketPath)
-	return unixrpc.ServeHTTP(serveCtx, srv, ln, 5*time.Second)
+	return unixrpc.ServeHTTP(serveCtx, srv, unixrpc.PanelListener(ln), 5*time.Second)
 }

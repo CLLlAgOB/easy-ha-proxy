@@ -4,6 +4,7 @@ After=docker.service
 Requires=docker.service
 
 [Service]
+Environment="EASY_HA_PROXY_PANEL_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
 Type=simple
 User=root
 Group={{ authelia_log_reader_group }}

@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,15 +20,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/netpolicy"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
 var (
 	certTargetNameRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 	certTargetUserRe  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._@\\-]{0,127}$`)
-	certTargetHostRe  = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 	certDNSNameRe     = regexp.MustCompile(`DNS:([^\s,]+)`)
 	certControlCharRe = regexp.MustCompile("[\x00-\x1f\x7f]")
 )
@@ -379,43 +377,52 @@ func (o CertDeliverOptions) buildArtefacts(lineage string, record map[string]any
 
 // sshBaseCommand: the options shared by every call to the OpenSSH client,
 // with the host key pinned to what the operator saved.
-func (o CertDeliverOptions) sshBaseCommand(record map[string]any, binary string) []string {
+func (o CertDeliverOptions) sshBaseCommand(record map[string]any, binary string, target certSSHTarget) []string {
 	name := pyx.Str(record["name"])
-	port := "22"
-	if v := record["port"]; pyx.Truthy(v) {
-		port = pyx.Str(v)
-	}
 	portFlag := "-P" // sftp and scp; only ssh takes -p
 	if strings.HasSuffix(binary, "/ssh") || binary == "ssh" {
 		portFlag = "-p"
 	}
-	return []string{
-		binary,
+	cmd := append([]string{binary}, netpolicy.SSHOptions(target.address, target.knownHost)...)
+	return append(cmd,
 		"-o", "BatchMode=yes",
 		"-o", "StrictHostKeyChecking=yes",
-		"-o", "UserKnownHostsFile=" + o.knownHostsPath(name),
+		"-o", "UserKnownHostsFile="+o.knownHostsPath(name),
 		"-o", "IdentitiesOnly=yes",
 		"-o", "ConnectTimeout=20",
 		"-i", o.keyPath(name),
-		portFlag, port,
-	}
+		portFlag, strconv.FormatInt(target.port, 10),
+	)
 }
 
-func certValidatedTarget(record map[string]any) (string, error) {
+type certSSHTarget struct {
+	address, knownHost, remote string
+	port                       int64
+}
+
+func certValidatedTarget(record map[string]any) (certSSHTarget, error) {
 	user := strings.TrimSpace(recordStr(record, "user", ""))
 	host := strings.TrimSpace(recordStr(record, "host", ""))
 	if !certTargetUserRe.MatchString(user) {
-		return "", deliveryErr("delivery target user contains unsupported characters")
+		return certSSHTarget{}, deliveryErr("delivery target user contains unsupported characters")
 	}
-	if host == "" || utf8.RuneCountInString(host) > 253 || strings.HasPrefix(host, "-") {
-		return "", deliveryErr("delivery target host is invalid")
-	}
-	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err != nil {
-		if !certTargetHostRe.MatchString(host) {
-			return "", deliveryErr("delivery target host is invalid")
+	port := int64(22)
+	if value := record["port"]; pyx.Truthy(value) {
+		var err error
+		port, err = strconv.ParseInt(pyx.Str(value), 10, 64)
+		if err != nil || port < 1 || port > 65535 {
+			return certSSHTarget{}, deliveryErr("delivery target port is invalid")
 		}
 	}
-	return user + "@" + host, nil
+	address, err := netpolicy.ResolveSSHHost(host)
+	if err != nil {
+		return certSSHTarget{}, deliveryErr("%v", err)
+	}
+	remote := address
+	if strings.ContainsRune(address, ':') {
+		remote = "[" + address + "]"
+	}
+	return certSSHTarget{address: address, knownHost: netpolicy.SSHKnownHost(host, port), remote: user + "@" + remote, port: port}, nil
 }
 
 // remoteQuote quotes a path for the sftp batch language, which splits on whitespace.
@@ -457,7 +464,7 @@ func (o CertDeliverOptions) runCertCommand(argv []string, stdin string) (certRun
 	return certRun{rc: cmd.ProcessState.ExitCode(), stderr: strings.ToValidUTF8(stderr.String(), "�")}, nil
 }
 
-func (o CertDeliverOptions) send(record map[string]any, artefacts []ArtefactPair) error {
+func (o CertDeliverOptions) send(record map[string]any, artefacts []ArtefactPair, target certSSHTarget) error {
 	transport := strings.ToLower(strings.TrimSpace(recordStr(record, "transport", "sftp")))
 	known := false
 	for _, t := range certTransports {
@@ -466,12 +473,8 @@ func (o CertDeliverOptions) send(record map[string]any, artefacts []ArtefactPair
 	if !known {
 		return deliveryErr("transport must be one of %s", strings.Join(certTransports, ", "))
 	}
-	target, err := certValidatedTarget(record)
-	if err != nil {
-		return err
-	}
-
 	var res certRun
+	var err error
 	if transport == "sftp" {
 		var batch strings.Builder
 		for _, a := range artefacts {
@@ -486,7 +489,7 @@ func (o CertDeliverOptions) send(record map[string]any, artefacts []ArtefactPair
 			batch.WriteString("put " + local + " " + remote + "\n")
 		}
 		batch.WriteString("quit\n")
-		argv := append(o.sshBaseCommand(record, o.SFTPBin), "-b", "-", "--", target)
+		argv := append(o.sshBaseCommand(record, o.SFTPBin, target), "-b", "-", "--", target.remote)
 		res, err = o.runCertCommand(argv, batch.String())
 	} else {
 		// scp takes many sources but only one destination: one artefact goes
@@ -500,11 +503,11 @@ func (o CertDeliverOptions) send(record map[string]any, artefacts []ArtefactPair
 		if certControlCharRe.MatchString(destination) {
 			return deliveryErr("remote path contains control characters")
 		}
-		argv := append(o.sshBaseCommand(record, o.SCPBin), "--")
+		argv := append(o.sshBaseCommand(record, o.SCPBin, target), "--")
 		for _, a := range artefacts {
 			argv = append(argv, a.LocalPath)
 		}
-		argv = append(argv, target+":"+destination)
+		argv = append(argv, target.remote+":"+destination)
 		res, err = o.runCertCommand(argv, "")
 	}
 	if err != nil {
@@ -525,31 +528,27 @@ func (o CertDeliverOptions) send(record map[string]any, artefacts []ArtefactPair
 
 // runPostCommand: whatever the far side needs once the file has landed. A
 // failure is reported without undoing the delivery -- the file did arrive.
-func (o CertDeliverOptions) runPostCommand(record map[string]any) (string, error) {
+func (o CertDeliverOptions) runPostCommand(record map[string]any, target certSSHTarget) string {
 	command := strings.TrimSpace(recordStr(record, "post_command", ""))
 	if command == "" {
-		return "", nil
+		return ""
 	}
-	target, err := certValidatedTarget(record)
-	if err != nil {
-		return "", err
-	}
-	argv := append(o.sshBaseCommand(record, o.SSHBin), "--", target, command)
+	argv := append(o.sshBaseCommand(record, o.SSHBin, target), "--", target.remote, command)
 	res, err := o.runCertCommand(argv, "")
 	if errors.Is(err, errCertTimeout) {
-		return fmt.Sprintf("the file was delivered but the command afterwards timed out after %ds", o.timeoutSeconds()), nil
+		return fmt.Sprintf("the file was delivered but the command afterwards timed out after %ds", o.timeoutSeconds())
 	}
 	if err != nil {
-		return "the file was delivered but the command afterwards failed: " + err.Error(), nil
+		return "the file was delivered but the command afterwards failed: " + err.Error()
 	}
 	if res.rc != 0 {
 		detail := strings.TrimSpace(res.stderr)
 		if detail == "" {
 			detail = fmt.Sprintf("exit %d", res.rc)
 		}
-		return "the file was delivered but the command afterwards failed: " + detail, nil
+		return "the file was delivered but the command afterwards failed: " + detail
 	}
-	return "", nil
+	return ""
 }
 
 func (o CertDeliverOptions) timeoutSeconds() int { return int(o.Timeout / time.Second) }
@@ -592,6 +591,10 @@ func (o CertDeliverOptions) deliver(record map[string]any, lineage string) certO
 			"the certificate in %s does not cover %s; a target receives one certificate, so give each certificate a target of its own",
 			filepath.Base(lineage), strings.Join(missing, ", "))}
 	}
+	target, err := certValidatedTarget(record)
+	if err != nil {
+		return certOutcome{name: name, errText: err.Error()}
+	}
 
 	workdir, err := os.MkdirTemp("", "cert-deliver-")
 	if err != nil {
@@ -601,7 +604,7 @@ func (o CertDeliverOptions) deliver(record map[string]any, lineage string) certO
 	_ = os.Chmod(workdir, 0o700)
 	artefacts, err := o.buildArtefacts(lineage, record, workdir)
 	if err == nil {
-		err = o.send(record, artefacts)
+		err = o.send(record, artefacts, target)
 	}
 	if err != nil {
 		if errors.Is(err, errCertTimeout) {
@@ -609,11 +612,7 @@ func (o CertDeliverOptions) deliver(record map[string]any, lineage string) certO
 		}
 		return certOutcome{name: name, errText: err.Error()}
 	}
-	warning, err := o.runPostCommand(record)
-	if err != nil {
-		return certOutcome{name: name, errText: err.Error()}
-	}
-	return certOutcome{name: name, ok: true, warning: warning}
+	return certOutcome{name: name, ok: true, warning: o.runPostCommand(record, target)}
 }
 
 func (o CertDeliverOptions) deliverAll(lg certLogger, lineage string, domains []string) []certOutcome {

@@ -4,6 +4,8 @@ After=network-online.target haproxy.service
 Wants=network-online.target
 
 [Service]
+Environment="EASY_HA_PROXY_PANEL_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
+Environment="HAPROXY_DNS_CREDENTIALS_DIR={{ dns_credentials_dir | default('/etc/easy-ha-proxy/dns-providers') }}"
 Type=simple
 EnvironmentFile={{ haproxy_admin_env_file }}
 Environment="EASY_HA_PROXY_REBOOT_MARKER={{ maintenance_reboot_marker_path | default('/run/easy-ha-proxy/easy-ha-proxy-web-reboot.json') }}"

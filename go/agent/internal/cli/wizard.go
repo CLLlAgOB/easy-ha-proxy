@@ -40,7 +40,6 @@ type Context struct {
 	Stdout   io.Writer
 	Stderr   io.Writer
 	reader   *bufio.Reader
-	ttyFile  *os.File
 	isTTYFn  func() bool
 	promptFn func(label, defaultVal string, validator func(string) string) (string, error)
 	boolFn   func(label string, defaultVal bool) (bool, error)
@@ -77,6 +76,19 @@ func (c *Context) isTTY() bool {
 	}
 	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS)
 	return err == nil
+}
+
+func (c *Context) interactiveInput() (*Context, func(), error) {
+	if c.isTTY() || os.Getenv("EASY_HA_PROXY_ALLOW_STDIN") == "1" {
+		return c, func() {}, nil
+	}
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return nil, nil, installerErrorf("Interactive configuration needs a terminal. Download install-local.sh and run it from a terminal.")
+	}
+	interactive := *c
+	interactive.Stdin, interactive.reader = tty, bufio.NewReader(tty)
+	return &interactive, func() { _ = tty.Close() }, nil
 }
 
 func (c *Context) readLine(promptText string) (string, error) {
@@ -433,14 +445,11 @@ func defaultConfigureInteractively(ctx *Context, opts ConfigureOptions) (string,
 		return directory, nil
 	}
 
-	if !ctx.isTTY() && os.Getenv("EASY_HA_PROXY_ALLOW_STDIN") != "1" {
-		tty, err := os.Open("/dev/tty")
-		if err != nil {
-			return "", installerErrorf("Interactive configuration needs a terminal. Download install-local.sh and run it from a terminal.")
-		}
-		defer tty.Close()
-		ctx = NewContext(tty, ctx.Stdout, ctx.Stderr)
+	ctx, closeInput, err := ctx.interactiveInput()
+	if err != nil {
+		return "", err
 	}
+	defer closeInput()
 
 	existingVars := pyyaml.NewMap()
 	existingAuthelia := pyyaml.NewMap()
@@ -1516,6 +1525,11 @@ func CommandInstall(ctx *Context, args InstallArgs) error {
 	if err := HoldMaintenanceLock(""); err != nil {
 		return err
 	}
+	ctx, closeInput, err := ctx.interactiveInput()
+	if err != nil {
+		return err
+	}
+	defer closeInput()
 	tm := args.TestMode
 	directory, err := ConfigureInteractively(ctx, ConfigureOptions{
 		Overwrite:         args.Reconfigure,

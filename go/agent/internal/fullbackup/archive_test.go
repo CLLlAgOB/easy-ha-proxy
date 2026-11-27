@@ -202,6 +202,61 @@ func TestTheCorePayloadRefusesWhatIsNotManaged(t *testing.T) {
 	}
 }
 
+func TestPayloadPreservesHostPaths(t *testing.T) {
+	t.Setenv("EASY_HA_PROXY_SOURCE_DIR", "/etc/easy-ha-proxy/recovery[1]")
+	payload := filepath.Join(t.TempDir(), "payload.tar.gz")
+	writeTar(t, payload, []tarEntry{file("./var/lib/easy-ha-proxy/backup-web/history", "legacy")})
+	if _, err := validatePayload(payload, false); err != nil {
+		t.Fatalf("legacy member covered by extraction exclusions: %v", err)
+	}
+	for _, name := range []string{"var/lib/easy-ha-proxy/backup-web//history", "etc/easy-ha-proxy/./recovery[1]/state"} {
+		writeTar(t, payload, []tarEntry{file(name, "state")})
+		if _, err := validatePayload(payload, false); err == nil {
+			t.Errorf("accepted noncanonical protected member %q", name)
+		}
+		if err := validateRollbackPayload(payload, true); err == nil {
+			t.Errorf("accepted noncanonical protected rollback member %q", name)
+		}
+	}
+	writeTar(t, payload, []tarEntry{{name: "etc/easy-ha-proxy/copy", typ: tar.TypeLink, link: "etc/easy-ha-proxy/recovery[1]/state"}})
+	if _, err := validatePayload(payload, false); err == nil {
+		t.Fatal("accepted a link to a protected file")
+	}
+	r := record(t, func([]string) (runResult, error) { return runResult{}, nil })
+	if err := extractPayload(payload, []string{"etc/easy-ha-proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, option := range []string{"--no-overwrite-dir", "--anchored", "--no-wildcards", "--exclude=etc/easy-ha-proxy/recovery[1]"} {
+		if !contains(r.calls[0], option) {
+			t.Errorf("scoped extraction omitted %q", option)
+		}
+	}
+}
+
+func TestPayloadAncestorMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy memberPolicy
+	}{{"usr/local/sbin", coreMemberPolicy}, {"root", sshMemberPolicy}, {"home/operator", sshMemberPolicy}} {
+		h := member(tc.name, tar.TypeDir, "")
+		h.Mode = 0o755
+		if err := tc.policy(h, tc.name, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := tc.policy(h, tc.name, map[string]string{"SCHILY.acl.access": "example"}); err == nil {
+			t.Errorf("accepted an ACL on %s", tc.name)
+		}
+		h.Uid = 1000
+		if err := tc.policy(h, tc.name, nil); err == nil {
+			t.Errorf("accepted non-root ownership on %s", tc.name)
+		}
+		h.Uid, h.Mode = 0, 0o775
+		if err := tc.policy(h, tc.name, nil); err == nil {
+			t.Errorf("accepted group write access on %s", tc.name)
+		}
+	}
+}
+
 func TestTheRollbackPayloadCanHoldCoreAndOptedInSSHState(t *testing.T) {
 	payload := filepath.Join(t.TempDir(), "rollback.tar.gz")
 	writeTar(t, payload, []tarEntry{file("etc/easy-ha-proxy/vars.yml", "root_domain: example.test\n"),
@@ -387,12 +442,36 @@ func TestTheLiveDatabaseWritersAreStoppedAndTheTimerFirst(t *testing.T) {
 	}
 }
 
-func TestConfigScopeMembersAreTheFixedRoots(t *testing.T) {
-	record(t, func([]string) (runResult, error) {
-		return runResult{Stdout: "etc/haproxy/\netc/haproxy/haproxy.cfg\n./opt/haproxy-admin/config/websites.yml\netc/easy-ha-proxy/vars.yml\n"}, nil
-	})
-	got, err := configScopeMembers("payload.tar.gz")
-	if err != nil || !reflect.DeepEqual(got, []string{"etc/haproxy", "opt/haproxy-admin/config"}) {
+func TestConfigScopeSelectsExactArchiveNames(t *testing.T) {
+	payload := filepath.Join(t.TempDir(), "payload.tar.gz")
+	writeTar(t, payload, []tarEntry{file("etc/haproxy/haproxy.cfg", "config"), file("./opt/haproxy-admin/config/websites.yml", "sites"), file("etc/easy-ha-proxy/vars.yml", "vars")})
+	got, err := configScopeMembers(payload)
+	if err != nil || !reflect.DeepEqual(got, []string{"etc/haproxy/haproxy.cfg", "./opt/haproxy-admin/config/websites.yml"}) {
 		t.Fatalf("members %v err %v", got, err)
+	}
+	requireTools(t, "tar")
+	dest := t.TempDir()
+	oldRun := runCommand
+	swap(t, &runCommand, func(argv []string, opts runOptions) (runResult, error) {
+		for i, arg := range argv {
+			if arg == "-C" {
+				argv[i+1] = dest
+				break
+			}
+		}
+		return oldRun(argv, opts)
+	})
+	if err := extractPayload(payload, got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "opt/haproxy-admin/config/websites.yml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "etc/easy-ha-proxy/vars.yml")); !os.IsNotExist(err) {
+		t.Fatalf("out-of-scope file was extracted: %v", err)
+	}
+	writeTar(t, payload, []tarEntry{{name: "etc/haproxy/copy", typ: tar.TypeLink, link: "etc/easy-ha-proxy/vars.yml"}})
+	if _, err := configScopeMembers(payload); err == nil {
+		t.Fatal("accepted a link outside the configuration scope")
 	}
 }

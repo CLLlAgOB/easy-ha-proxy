@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
-	"os/user"
 	"sort"
 	"strconv"
 	"strings"
@@ -425,18 +423,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func setSocketPerms(path, group string) error {
-	g, err := user.LookupGroup(group)
-	if err != nil {
-		return err
-	}
-	gid, _ := strconv.Atoi(g.Gid)
-	if err := os.Chown(path, 0, gid); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o660)
-}
-
 // Main is main(): the collector and the read API until a signal.
 func Main() error {
 	cfg := LoadConfig(ConfigPath)
@@ -461,19 +447,13 @@ func Main() error {
 	log.Printf("Starting easy-ha-proxy-metricsd: socket=%s db=%s interval=%ds limit=%dMiB reserve=%dMiB storage=%s",
 		SocketPath, DatabasePath, cfg.PollIntervalSeconds, status.MaxDatabaseBytes/mib, status.ReservedFreeBytes/mib, status.State)
 	col.Start()
-	if _, err := os.Stat(SocketPath); err == nil {
-		_ = os.Remove(SocketPath)
-	}
-	ln, err := net.Listen("unix", SocketPath)
+	ln, err := unixrpc.ListenUnix(SocketPath, "", SocketGroup, 0o660)
 	if err != nil {
 		col.Stop()
 		return err
 	}
-	if err := setSocketPerms(SocketPath, SocketGroup); err != nil {
-		log.Printf("Failed to set socket permissions: %v", err)
-	}
 	srv := &http.Server{Handler: &Server{Collector: col, DB: db}, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second}
-	err = unixrpc.ServeHTTP(ctx, srv, ln, 5*time.Second)
+	err = unixrpc.ServeHTTP(ctx, srv, unixrpc.PanelListener(ln), 5*time.Second)
 	col.Stop()
 	if _, statErr := os.Stat(SocketPath); statErr == nil {
 		_ = os.Remove(SocketPath)

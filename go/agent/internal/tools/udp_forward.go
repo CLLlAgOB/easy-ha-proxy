@@ -628,7 +628,11 @@ func (r udpRunner) restore(commands [][]string, binary string, tables []string) 
 
 func (r udpRunner) dockerUserHook(binary string) error {
 	if rc, _, err := r.run(binary, false, "-t", "filter", "-S", "DOCKER-USER"); err == nil && rc == 0 {
-		if rc, _, _ := r.run(binary, false, "-t", "filter", "-C", "DOCKER-USER", "-j", udpFwdChain); rc != 0 {
+		rc, _, err := r.run(binary, false, "-t", "filter", "-C", "DOCKER-USER", "-j", udpFwdChain)
+		if err != nil {
+			return err
+		}
+		if rc != 0 {
 			if _, _, err := r.run(binary, true, "-t", "filter", "-I", "DOCKER-USER", "1", "-j", udpFwdChain); err != nil {
 				return err
 			}
@@ -688,7 +692,11 @@ func (r udpRunner) syncOtherForwardFilters(commands [][]string) error {
 		if _, _, err := r.run(binary, false, "-t", "filter", "-N", udpFwdChain); err != nil {
 			return err
 		}
-		if rc, _, _ := r.run(binary, false, "-t", "filter", "-C", "FORWARD", "-j", udpFwdChain); rc != 0 {
+		rc, _, err := r.run(binary, false, "-t", "filter", "-C", "FORWARD", "-j", udpFwdChain)
+		if err != nil {
+			return err
+		}
+		if rc != 0 {
 			if _, _, err := r.run(binary, true, "-t", "filter", "-I", "FORWARD", "1", "-j", udpFwdChain); err != nil {
 				return err
 			}

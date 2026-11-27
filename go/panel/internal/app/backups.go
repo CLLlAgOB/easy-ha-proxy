@@ -22,7 +22,7 @@ var (
 	backupIdentifierRe = regexp.MustCompile(`^[a-f0-9]{32}$`)
 	safeFilenameRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
 	destinationNameRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
-	scheduleTimeRe     = regexp.MustCompile(`^[0-2][0-9]:[0-5][0-9]$`)
+	scheduleTimeRe     = regexp.MustCompile(`^(?:[01][0-9]|2[0-3]):[0-5][0-9]$`)
 	backupAudited      = map[string]struct {
 		action string
 		fields []string

@@ -1198,6 +1198,7 @@ func jsonErrText(err error) string {
 
 // Serve accepts connections on ln one at a time until ctx is canceled or ln fails.
 func (c *Configd) Serve(ctx context.Context, ln net.Listener) error {
+	ln = unixrpc.PanelListener(ln)
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 	for {

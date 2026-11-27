@@ -150,10 +150,13 @@ fi
 # it gets the one built for this source from the project's GitHub release.
 # shellcheck source=installer/agent-fetch.sh
 source "${source_dir}/installer/agent-fetch.sh"
-if easy_ha_proxy_agent_runs_cli "${agent_bin}" || easy_ha_proxy_agent_runs_cli "${staged_agent}"; then
+source_revision="$(easy_ha_proxy_source_revision "${source_dir}" || true)"
+if easy_ha_proxy_agent_matches_source "${agent_bin}" "${source_revision}" ||
+   easy_ha_proxy_agent_matches_source "${staged_agent}" "${source_revision}"; then
   log "The host agent is ready"
 elif [[ "${skip_bootstrap_dependencies}" == "true" ]]; then
-  die "The prepared host agent is missing: ${agent_bin}"
+  easy_ha_proxy_agent_runs_cli "${agent_bin}" || easy_ha_proxy_agent_runs_cli "${staged_agent}" ||
+    die "The prepared host agent is missing: ${agent_bin}"
 else
   log "Fetching the host agent"
   easy_ha_proxy_fetch_agent "${source_dir}" "${staged_agent}" ||

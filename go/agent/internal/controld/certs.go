@@ -10,9 +10,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/certrestore"
 )
 
 // ensureWithin is _ensure_within: candidate resolved must stay under root.
@@ -148,21 +149,6 @@ func (d *Daemon) certsBackupB64() (string, error) {
 	return b64, nil
 }
 
-var (
-	certbotHookKeyRE     = regexp.MustCompile(`(?im)^\s*(?:pre|post|deploy|renew|manual_auth|manual_cleanup)[_-]hook\s*=`)
-	allowedLERestoreDirs = map[string]bool{"accounts": true, "archive": true, "live": true, "renewal": true, "keys": true, "csr": true}
-)
-
-func isAllowedLERestoreRel(parts []string) bool {
-	if len(parts) < 2 || !allowedLERestoreDirs[parts[0]] {
-		return false
-	}
-	if parts[0] == "renewal" {
-		return len(parts) == 2 && strings.HasSuffix(parts[1], ".conf") && !strings.HasPrefix(parts[1], ".")
-	}
-	return true
-}
-
 func (d *Daemon) certsRestoreB64(b64 string) (string, error) {
 	raw, err := b64decodeStrict(b64)
 	if err != nil {
@@ -187,7 +173,7 @@ func (d *Daemon) certsRestoreB64(b64 string) (string, error) {
 		if strings.HasSuffix(name, "/") {
 			continue
 		}
-		isRenewal := false
+		isLE := false
 		var dst string
 		var rel []string
 		switch {
@@ -201,13 +187,10 @@ func (d *Daemon) certsRestoreB64(b64 string) (string, error) {
 			}
 		case strings.HasPrefix(name, "letsencrypt/") && leRoot != "":
 			rel = pyPathParts(name)[1:]
-			if !isAllowedLERestoreRel(rel) {
+			if !certrestore.AllowedLEPath(rel) {
 				continue
 			}
-			isRenewal = rel[0] == "renewal"
-			if dst, err = ensureWithin(leRoot, filepath.Join(append([]string{leRoot}, rel...)...)); err != nil {
-				return "", err
-			}
+			isLE = true
 		default:
 			continue
 		}
@@ -244,8 +227,15 @@ func (d *Daemon) certsRestoreB64(b64 string) (string, error) {
 			return "", vErr("certificate archive entry size mismatch")
 		}
 		remaining -= readTotal
-		if isRenewal && certbotHookKeyRE.Match(bytes.ToValidUTF8(payload.Bytes(), []byte("�"))) {
-			log.Printf("certs-restore: refused renewal config with hook directive: %s", strings.Join(rel, "/"))
+		if isLE {
+			if rel[0] == "renewal" && !certrestore.SafeRenewal(payload.Bytes(), leRoot, env("HAPROXY_DNS_CREDENTIALS_DIR", certrestore.DefaultDNSCredentialsDir), strings.TrimSuffix(rel[1], ".conf")) {
+				log.Printf("certs-restore: refused unsafe Certbot renewal config: %s", strings.Join(rel, "/"))
+				continue
+			}
+			if err := certrestore.WriteLEFile(leRoot, rel, payload.Bytes()); err != nil {
+				return "", err
+			}
+			restored++
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o777); err != nil {

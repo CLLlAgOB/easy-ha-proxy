@@ -28,13 +28,20 @@ const (
 	AgentMember = "sbin/easy-ha-proxy-agent"
 	// MaxBootstrapBlobBytes limits downloaded blobs to 256 MiB.
 	MaxBootstrapBlobBytes = 256 * 1024 * 1024
+	defaultCosignIdentity = `^https://github\.com/CLLlAgOB/easy-ha-proxy/\.github/workflows/ci\.yml@refs/heads/(main|alpha)$`
+	defaultCosignIssuer   = "https://token.actions.githubusercontent.com"
 )
 
 var (
 	bootstrapRegistry   = DefaultRegistry
 	bootstrapAuthURL    = DefaultAuthURL
-	bootstrapHTTPClient = &http.Client{Timeout: 60 * time.Second}
-	bootstrapArchFunc   = defaultArchitecture
+	bootstrapHTTPClient = &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" || len(via) >= 10 {
+			return bootstrapErrorf("invalid redirect while downloading a native release")
+		}
+		return nil
+	}}
+	bootstrapArchFunc = defaultArchitecture
 )
 
 const bootstrapAcceptHeader = "application/vnd.oci.image.index.v1+json, " +
@@ -88,7 +95,7 @@ func ImageReference(variables map[string]any, revision string) string {
 	pin := true
 	if raw, ok := variables["native_release_pin_revision"]; ok && raw != nil {
 		lower := strings.ToLower(strings.TrimSpace(fmt.Sprint(raw)))
-		if lower == "false" || lower == "0" || lower == "no" {
+		if lower == "false" || lower == "0" || lower == "no" || lower == "off" {
 			pin = false
 		}
 	}
@@ -134,6 +141,10 @@ func registryGet(url, token, accept string) ([]byte, string, error) {
 
 // FetchAgent downloads and verifies the agent binary from an OCI registry image.
 func FetchAgent(reference, revision, arch string) ([]byte, error) {
+	return fetchAgent(reference, revision, arch, nil)
+}
+
+func fetchAgent(reference, revision, arch string, verify func(string) error) ([]byte, error) {
 	name, tag, _ := strings.Cut(reference, ":")
 	repo := name
 	if !strings.Contains(repo, "/") {
@@ -163,6 +174,11 @@ func FetchAgent(reference, revision, arch string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if verify != nil {
+		if err := verify(name + "@sha256:" + sha256Hex(body)); err != nil {
+			return nil, err
+		}
+	}
 	var manifest map[string]any
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		return nil, bootstrapErrorf("invalid manifest JSON for %s: %v", reference, err)
@@ -184,6 +200,9 @@ func FetchAgent(reference, revision, arch string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		if chosenDigest != "sha256:"+sha256Hex(body) {
+			return nil, bootstrapErrorf("platform manifest %s does not match its digest", chosenDigest)
+		}
 		manifest = nil
 		if err := json.Unmarshal(body, &manifest); err != nil {
 			return nil, bootstrapErrorf("invalid platform manifest JSON for %s: %v", reference, err)
@@ -198,6 +217,9 @@ func FetchAgent(reference, revision, arch string) ([]byte, error) {
 	cfgBody, _, err := registryGet(fmt.Sprintf("%s/v2/%s/blobs/%s", bootstrapRegistry, repo, cfgDigest), token, "")
 	if err != nil {
 		return nil, err
+	}
+	if cfgDigest != "sha256:"+sha256Hex(cfgBody) {
+		return nil, bootstrapErrorf("config blob %s does not match its digest", cfgDigest)
 	}
 	var cfgDoc struct {
 		Config struct {
@@ -225,8 +247,7 @@ func FetchAgent(reference, revision, arch string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		_, expectedHex, _ := strings.Cut(layerDigest, ":")
-		if sha256Hex(blob) != expectedHex {
+		if layerDigest != "sha256:"+sha256Hex(blob) {
 			return nil, bootstrapErrorf("layer %s does not match its digest", layerDigest)
 		}
 		if err := extractMembersFromTar(blob, files, AgentMember, "SHA256SUMS"); err != nil {
@@ -370,12 +391,30 @@ func BundleAgent(variables map[string]any, arch string) ([]byte, error) {
 // Docker image (used during offline restores). Returns (nil, nil) if Docker or
 // the image is unavailable.
 func DockerAgent(reference, revision string) ([]byte, error) {
+	return dockerAgent(reference, revision, nil)
+}
+
+func dockerAgent(reference, revision string, verify func(string) error) ([]byte, error) {
 	docker, err := lookPath("docker")
 	if err != nil || docker == "" {
 		return nil, nil
 	}
 	out, rc, err := captureCommand(docker, "image", "inspect", "--format",
-		`{{ index .Config.Labels "org.opencontainers.image.revision" }}`, reference)
+		`{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}`, reference)
+	if err != nil || rc != 0 {
+		return nil, nil
+	}
+	immutable := strings.TrimSpace(out)
+	if verify != nil {
+		if !strings.Contains(immutable, "@sha256:") {
+			return nil, nil
+		}
+		if err := verify(immutable); err != nil {
+			return nil, err
+		}
+	}
+	out, rc, err = captureCommand(docker, "image", "inspect", "--format",
+		`{{ index .Config.Labels "org.opencontainers.image.revision" }}`, immutable)
 	if err != nil || rc != 0 {
 		return nil, nil
 	}
@@ -387,7 +426,7 @@ func DockerAgent(reference, revision string) ([]byte, error) {
 		}
 		return nil, bootstrapErrorf("%s was built from %s, not %s", reference, display, revision)
 	}
-	createdOut, rc, err := captureCommand(docker, "create", "--pull=never", reference)
+	createdOut, rc, err := captureCommand(docker, "create", "--pull=never", immutable)
 	if err != nil || rc != 0 {
 		return nil, nil
 	}
@@ -417,6 +456,35 @@ func DockerAgent(reference, revision string) ([]byte, error) {
 		return nil, err
 	}
 	return agentBytes, nil
+}
+
+func nativeSignatureVerifier(variables map[string]any) (func(string) error, error) {
+	switch strings.ToLower(strings.TrimSpace(strVal(variables["native_release_verify_signature"]))) {
+	case "", "false", "0", "no", "off":
+		return nil, nil
+	case "true", "1", "yes", "on":
+	default:
+		return nil, bootstrapErrorf("native_release_verify_signature must be a boolean")
+	}
+	cosign, err := lookPath("cosign")
+	if err != nil {
+		return nil, bootstrapErrorf("native_release_verify_signature is enabled, but cosign is not installed")
+	}
+	identity := strVal(variables["native_release_cosign_identity_regexp"])
+	if identity == "" {
+		identity = defaultCosignIdentity
+	}
+	issuer := strVal(variables["native_release_cosign_oidc_issuer"])
+	if issuer == "" {
+		issuer = defaultCosignIssuer
+	}
+	return func(reference string) error {
+		res := runSubprocess(cosign, "verify", "--certificate-identity-regexp", identity, "--certificate-oidc-issuer", issuer, "--", reference)
+		if res.Err != nil || res.ExitCode != 0 {
+			return bootstrapErrorf("cosign could not verify %s: %s", reference, strings.TrimSpace(res.Stderr))
+		}
+		return nil
+	}, nil
 }
 
 // InstallAgent writes the binary atomically to destination with mode 0755.

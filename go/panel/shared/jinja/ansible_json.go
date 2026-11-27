@@ -75,6 +75,9 @@ func AnsibleTernary(_ *Environment, v any, args []any, _ *Map) (any, error) {
 
 // pyDumps is json.dumps: indent < 0 is the one-line form.
 func pyDumps(v any, o jsonOpts, depth int) (string, error) {
+	if depth > maxRenderDepth || o.indent > maxOutputBytes/(depth+1) {
+		return "", errf("JSON serialization exceeds the template output budget")
+	}
 	pad, end, item, colon := "", "", ", ", ": "
 	if o.indent >= 0 {
 		pad = "\n" + strings.Repeat(" ", o.indent*(depth+1))
@@ -108,7 +111,6 @@ func pyDumps(v any, o jsonOpts, depth int) (string, error) {
 		}
 		var keys []string
 		values := map[string]any{}
-		var err error
 		x.Each(func(k, val any) {
 			ks, ok := k.(string)
 			if !ok {
@@ -121,24 +123,35 @@ func pyDumps(v any, o jsonOpts, depth int) (string, error) {
 			sort.Strings(keys)
 		}
 		parts := make([]string, 0, len(keys))
+		size := len(end) + 2
 		for _, k := range keys {
-			s, e := pyDumps(normalize(values[k]), o, depth+1)
-			if e != nil {
-				err = e
+			s, err := pyDumps(normalize(values[k]), o, depth+1)
+			if err != nil {
+				return "", err
 			}
-			parts = append(parts, pad+pyJSONString(k, o.ensureASCII)+colon+s)
+			key := pyJSONString(k, o.ensureASCII)
+			size += len(pad) + len(key) + len(colon) + len(s) + len(item)
+			if size > maxOutputBytes {
+				return "", errf("JSON serialization exceeds the template output budget")
+			}
+			parts = append(parts, pad+key+colon+s)
 		}
-		return "{" + strings.Join(parts, item) + end + "}", err
+		return "{" + strings.Join(parts, item) + end + "}", nil
 	case []any, Tuple:
 		items, _ := iterate(x)
 		if len(items) == 0 {
 			return "[]", nil
 		}
 		parts := make([]string, len(items))
+		size := len(end) + 2
 		for i, it := range items {
 			s, err := pyDumps(normalize(it), o, depth+1)
 			if err != nil {
 				return "", err
+			}
+			size += len(pad) + len(s) + len(item)
+			if size > maxOutputBytes {
+				return "", errf("JSON serialization exceeds the template output budget")
 			}
 			parts[i] = pad + s
 		}

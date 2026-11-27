@@ -146,6 +146,7 @@ var (
 // ValidGitBranch checks whether branch is a safe plain git branch name.
 func ValidGitBranch(branch string) bool {
 	return gitBranchRe.MatchString(branch) &&
+		!strings.HasPrefix(branch, "-") &&
 		!strings.Contains(branch, "..") &&
 		!strings.HasPrefix(branch, "/") &&
 		!strings.HasSuffix(branch, "/") &&
@@ -1103,15 +1104,8 @@ func OfflineRestoreRequiredImages(directory, controllerSource string) (map[strin
 		if pin, err := enabled("native_release_pin_revision", true); err != nil {
 			return nil, err
 		} else if pin {
-			res := runSubprocess("git", "-c", "safe.directory="+controllerSource, "-C", controllerSource, "rev-parse", "HEAD")
-			if res.Err == nil && res.ExitCode == 0 {
-				rev := strings.TrimSpace(res.Stdout)
-				if len(rev) > 12 {
-					rev = rev[:12]
-				}
-				if rev != "" {
-					reference += "-" + rev
-				}
+			if rev := sourceTreeRevision(controllerSource); rev != "" {
+				reference += "-" + rev[:12]
 			}
 		}
 		images[reference] = true

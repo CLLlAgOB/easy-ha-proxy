@@ -234,5 +234,5 @@ func (s *Server) Serve(ctx context.Context, socketPath string) error {
 		_ = os.Remove(socketPath)
 	}()
 	srv := &http.Server{Handler: s, ReadHeaderTimeout: 30 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 90 * time.Second}
-	return unixrpc.ServeHTTP(ctx, srv, ln, 3*time.Second)
+	return unixrpc.ServeHTTP(ctx, srv, unixrpc.PanelListener(ln), 3*time.Second)
 }

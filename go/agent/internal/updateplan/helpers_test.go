@@ -193,7 +193,7 @@ func gitHandler(argv []string) CommandResult {
 		return ok(remoteRevision + "\trefs/heads/main\n")
 	case hasPrefix(argv, "git", "clone"):
 		return failed(1, "candidate unavailable")
-	case is(argv, "apt-get", "-s", "upgrade"):
+	case is(argv, "apt-get", "-s", "upgrade", "--with-new-pkgs"):
 		return ok("")
 	}
 	return unexpected(argv)

@@ -609,7 +609,7 @@ func recoverRuntimeMaintenance(root string) error {
 			Health: hPtr,
 		})
 	}
-	dpkgLock, err := os.OpenFile(guardDpkgLockPath, os.O_RDWR, 0)
+	dpkgLock, err := os.OpenFile(guardDpkgLockPath, os.O_RDWR|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}

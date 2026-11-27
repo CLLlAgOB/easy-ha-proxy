@@ -337,11 +337,26 @@ func builtinFilters() map[string]FilterFunc {
 		case string:
 			indention = w
 		case int64:
+			if w < 0 || w > maxOutputBytes {
+				return nil, errf("indent width is out of range")
+			}
 			indention = strings.Repeat(" ", int(w))
 		}
 		first := Truthy(argOr(args, kwargs, 1, "first", false))
 		blank := Truthy(argOr(args, kwargs, 2, "blank", false))
 		lines := splitLines(s + "\n")
+		indented := 0
+		if first {
+			indented++
+		}
+		for _, line := range lines[1:] {
+			if blank || line != "" {
+				indented++
+			}
+		}
+		if len(s) > maxOutputBytes || indented > 0 && len(indention) > (maxOutputBytes-len(s))/indented {
+			return nil, errf("indent exceeds the template output budget")
+		}
 		var rv string
 		if blank {
 			rv = strings.Join(lines, "\n"+indention)
@@ -708,14 +723,15 @@ func builtinFilters() map[string]FilterFunc {
 		killwords := Truthy(argOr(args, kwargs, 1, "killwords", false))
 		end := Str(argOr(args, kwargs, 2, "end", "..."))
 		leeway, _, _, _ := asNumber(argOr(args, kwargs, 3, "leeway", int64(5)))
+		endLen := int64(len([]rune(end)))
+		if leeway < 0 || n < endLen {
+			return nil, errf("truncate length or leeway is out of range")
+		}
 		rs := []rune(s)
-		if int64(len(rs)) <= n+leeway {
+		if n >= int64(len(rs)) || leeway >= int64(len(rs))-n {
 			return s, nil
 		}
-		cut := int(n) - len([]rune(end))
-		if cut < 0 {
-			cut = 0
-		}
+		cut := int(n - endLen)
 		if killwords {
 			return string(rs[:cut]) + end, nil
 		}
@@ -732,6 +748,9 @@ func builtinFilters() map[string]FilterFunc {
 		}
 		n, _, _, _ := asNumber(argOr(args, kwargs, 0, "linecount", int64(1)))
 		fill := argOr(args, kwargs, 1, "fill_with", nil)
+		if fill != nil && n > maxOutputBytes/16 {
+			return nil, errf("batch padding exceeds the template output budget")
+		}
 		out := []any{}
 		var cur []any
 		for _, it := range items {

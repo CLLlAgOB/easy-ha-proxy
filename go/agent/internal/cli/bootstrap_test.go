@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -45,7 +46,7 @@ func makeTarGz(t *testing.T, files map[string][]byte) []byte {
 	return buf.Bytes()
 }
 
-func startFakeRegistry(t *testing.T, agent, sums []byte, revision string) *httptest.Server {
+func startFakeRegistry(t *testing.T, agent, sums []byte, revision string) string {
 	t.Helper()
 	blob := makeTarGz(t, map[string][]byte{
 		"sbin/easy-ha-proxy-agent": agent,
@@ -99,7 +100,7 @@ func startFakeRegistry(t *testing.T, agent, sums []byte, revision string) *httpt
 		bootstrapAuthURL = origAuth
 		bootstrapHTTPClient = origClient
 	})
-	return srv
+	return "clllagob/haproxy-admin-ui@sha256:" + sha256Hex(index)
 }
 
 func TestImageReference(t *testing.T) {
@@ -144,6 +145,21 @@ func TestFetchAgentVerifiedAndRejectedCases(t *testing.T) {
 	startFakeRegistry(t, agent, goodSums, testRevision)
 	if _, err := FetchAgent("clllagob/haproxy-admin-ui:native-alpha-0123456789ab", testRevision, "amd64"); err == nil || !strings.Contains(err.Error(), "no linux/amd64") {
 		t.Fatalf("expected platform error, got %v", err)
+	}
+}
+
+func TestFetchAgentVerifiesTheManifestConsumedByTheBootstrap(t *testing.T) {
+	agent := []byte("agent")
+	ref := startFakeRegistry(t, agent, []byte(sha256Hex(agent)+"  "+AgentMember+"\n"), testRevision)
+	verifyErr := errors.New("signature refused")
+	got, err := fetchAgent("clllagob/haproxy-admin-ui:native-alpha-0123456789ab", testRevision, "arm64", func(gotRef string) error {
+		if gotRef != ref {
+			t.Errorf("verified %q, want %q", gotRef, ref)
+		}
+		return verifyErr
+	})
+	if got != nil || !errors.Is(err, verifyErr) {
+		t.Fatalf("agent = %q, %v", got, err)
 	}
 }
 

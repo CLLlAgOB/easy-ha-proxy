@@ -14,7 +14,7 @@ import (
 )
 
 func aptOnly(argv []string) CommandResult {
-	if is(argv, "apt-get", "-s", "upgrade") {
+	if is(argv, "apt-get", "-s", "upgrade", "--with-new-pkgs") {
 		return ok("")
 	}
 	return unexpected(argv)
@@ -299,7 +299,7 @@ func TestPlanReportsOnlyManagedComposeStacksWithoutPulling(t *testing.T) {
 			return gitHandler(argv)
 		}
 		switch {
-		case is(argv, "apt-get", "-s", "upgrade"):
+		case is(argv, "apt-get", "-s", "upgrade", "--with-new-pkgs"):
 			return ok("Inst openssl [3.0.0] (3.0.1 Debian:stable)\nInst docker-ce [1] (2 Docker)\n")
 		case is(argv, "docker", "compose", "-f", autheliaCompose, "config", "--images"):
 			return ok("authelia/authelia:4.39.20\nredis@" + digestA + "\nauthelia/authelia:4.39.20\n")
@@ -375,7 +375,7 @@ func TestProbeTimeoutIsReportedWithoutFailingThePlan(t *testing.T) {
 			return ok("")
 		case hasSuffix(argv, "remote", "get-url", "origin"):
 			return ok("https://example.test/repository.git\n")
-		case hasPrefix(argv, "git", "ls-remote", "--heads"), is(argv, "apt-get", "-s", "upgrade"):
+		case hasPrefix(argv, "git", "ls-remote", "--heads"), is(argv, "apt-get", "-s", "upgrade", "--with-new-pkgs"):
 			return timeout
 		}
 		return unexpected(argv)
@@ -399,7 +399,7 @@ func TestRequestedAdminChannelChecksTargetTagWithoutPull(t *testing.T) {
 	writeFile(t, adminCompose, "services: {}\n")
 	runner := newFakeRunner(func(argv []string) CommandResult {
 		switch {
-		case is(argv, "apt-get", "-s", "upgrade"):
+		case is(argv, "apt-get", "-s", "upgrade", "--with-new-pkgs"):
 			return ok("")
 		case is(argv, "docker", "compose", "-f", adminCompose, "config", "--images"):
 			return ok("registry.example/admin:latest\n")
@@ -517,7 +517,7 @@ func runNativePlan(t *testing.T, c nativeCase) map[string]M {
 		case hasPrefix(argv, "git", "clone"):
 			copyTree(t, candidate, last(argv))
 			return ok("")
-		case is(argv, "apt-get", "-s", "upgrade"):
+		case is(argv, "apt-get", "-s", "upgrade", "--with-new-pkgs"):
 			return ok("")
 		}
 		return failed(1, "unexpected")

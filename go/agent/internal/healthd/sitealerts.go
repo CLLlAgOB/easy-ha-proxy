@@ -381,7 +381,7 @@ func sendMail(recipient, subject, body string) bool {
 	clean := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(body, "\r\n", "\n"), "\r", "\n"), "\n", "\r\n")
 	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n", sender, to, oneLine, clean)
 	_ = os.MkdirAll(filepath.Dir(siteAlertsMailLock), 0o750)
-	lock, err := os.OpenFile(siteAlertsMailLock, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o640)
+	lock, err := os.OpenFile(siteAlertsMailLock, os.O_CREATE|os.O_RDWR|os.O_APPEND|syscall.O_NOFOLLOW, 0o640)
 	if err != nil {
 		return false
 	}

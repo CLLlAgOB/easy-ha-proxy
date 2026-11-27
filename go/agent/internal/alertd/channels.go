@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -284,7 +285,7 @@ func (e *EmailChannel) Send(ctx context.Context, cfg Config, subject, body strin
 
 	if e.MailLockPath != "" {
 		_ = os.MkdirAll(filepath.Dir(e.MailLockPath), 0o750)
-		lf, err := os.OpenFile(e.MailLockPath, os.O_CREATE|os.O_RDWR, 0o640)
+		lf, err := os.OpenFile(e.MailLockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o640)
 		if err != nil {
 			return false, fmt.Sprintf("mail delivery failed: %v", err)
 		}

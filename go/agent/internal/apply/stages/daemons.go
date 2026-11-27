@@ -75,7 +75,7 @@ func controld(b *Builder) []engine.Step {
 	envFile := b.S("{{ haproxy_admin_env_file }}")
 	envExists := func(*engine.Run) bool { return b.Exists(envFile, false) }
 	return []engine.Step{
-		{Name: "haproxy-controld | Install required packages (ipset, socat)", Resource: &engine.Packages{Names: []string{"ipset", "socat"}}},
+		{Name: "haproxy-controld | Install required packages (ipset, socat)", Tags: restoreNetwork, Resource: &engine.Packages{Names: []string{"ipset", "socat"}}},
 		{Name: "haproxy-controld | Install systemd unit", Register: "haproxy_controld_unit",
 			Build: b.Template("haproxy-controld.service.j2", "/etc/systemd/system/"+unit, "root", "root", "0644")},
 		{Name: "haproxy-controld | Reload systemd if unit changed", When: Changed("haproxy_controld_unit"), Resource: engine.DaemonReload{}},
@@ -147,7 +147,7 @@ func alertd(b *Builder) []engine.Step {
 			Resource: b.Dir("{{ (alertd_database_path | default('/var/lib/easy-ha-proxy/alerts/alerts.db')) | dirname }}", "root", appGroup, "0750")},
 		{Name: "easy-ha-proxy-alertd | Seed the settings file", Register: "alertd_cfg",
 			Build: b.Template("alertd.json.j2", "{{ alertd_config_path | default((app_dir | default('/opt/haproxy-admin')) ~ '/alertd.json') }}",
-				"root", appGroup, "0640", NoForce)},
+				"root", appGroup, "0600", NoForce)},
 		{Name: "easy-ha-proxy-alertd | Install systemd unit", Register: "alertd_unit",
 			Build: b.Template("easy-ha-proxy-alertd.service.j2", "/etc/systemd/system/easy-ha-proxy-alertd.service", "root", "root", "0644")},
 	}

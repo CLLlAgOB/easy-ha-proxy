@@ -5,6 +5,7 @@ After=network.target haproxy.service
 Wants=network.target
 
 [Service]
+Environment="EASY_HA_PROXY_PANEL_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
 Type=simple
 User=root
 Group={{ app_group | default('hadmin') }}

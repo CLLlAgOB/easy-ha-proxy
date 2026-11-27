@@ -47,6 +47,7 @@ func Run(opts Options) error {
 // Serve accepts control socket clients until ctx is canceled and waits for
 // in-flight operations to finish before returning.
 func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
+	ln = unixrpc.PanelListener(ln)
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	var active sync.WaitGroup
 	defer func() {
@@ -146,8 +147,8 @@ func (d *Daemon) handleClient(conn net.Conn) {
 	}()
 	var chunks bytes.Buffer
 	buf := make([]byte, 4096)
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		n, err := conn.Read(buf)
 		if n > 0 {
 			if chunks.Len()+n > d.Opts.MaxCommandBytes {

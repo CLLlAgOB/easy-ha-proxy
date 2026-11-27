@@ -238,7 +238,7 @@ func TestOfflineRestoreRequiredImages(t *testing.T) {
 			"mail_relay_server: false\n", 0o600)
 
 	runSubprocessFn = func(name string, args ...string) subprocessResult {
-		return subprocessResult{ExitCode: 0, Stdout: "1d91160cd370abcdef0123456789\n"}
+		return subprocessResult{ExitCode: 0, Stdout: "1d91160cd370" + strings.Repeat("0", 28) + "\n"}
 	}
 	dockerContainerExistsFn = func(string) bool { return false }
 

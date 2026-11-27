@@ -620,7 +620,7 @@ func (d *Daemon) acquireOperation() (*os.File, error) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	f, err := os.OpenFile(d.Opts.OperationLockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(d.Opts.OperationLockPath, os.O_RDWR|os.O_CREATE|oNoFollow, 0o600)
 	if err == nil {
 		err = flockExclusive(f)
 		if err != nil {

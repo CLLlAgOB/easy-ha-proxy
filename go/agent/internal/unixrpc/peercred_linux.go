@@ -7,8 +7,39 @@ package unixrpc
 import (
 	"fmt"
 	"net"
+	"os"
+	"strings"
 	"syscall"
 )
+
+// PanelListener limits a privileged daemon's socket to root and the
+// configured panel account. An unprivileged daemon also accepts its own UID.
+func PanelListener(ln net.Listener) net.Listener {
+	name := strings.TrimSpace(os.Getenv("EASY_HA_PROXY_PANEL_SOCKET_USER"))
+	if name == "" {
+		name = "haproxyadmin"
+	}
+	return &peerListener{Listener: ln, panelUID: ResolveUID(name, -1), daemonUID: os.Geteuid()}
+}
+
+type peerListener struct {
+	net.Listener
+	panelUID, daemonUID int
+}
+
+func (l *peerListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		uid, err := PeerUID(conn)
+		if err == nil && (uid == 0 || uid == l.panelUID || uid == l.daemonUID) {
+			return conn, nil
+		}
+		_ = conn.Close()
+	}
+}
 
 // PeerUID returns the effective UID of the connected AF_UNIX peer via SO_PEERCRED.
 func PeerUID(conn net.Conn) (int, error) {

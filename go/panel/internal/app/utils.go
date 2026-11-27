@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/netip"
@@ -344,7 +343,7 @@ func ControldRequest(cmd string, timeout time.Duration) string {
 	if _, err := conn.Write([]byte(strings.TrimSpace(cmd) + "\n")); err != nil {
 		return "ERROR controld request failed: " + pyOSError(err)
 	}
-	raw, err := io.ReadAll(conn)
+	raw, err := readControldReply(conn)
 	if err != nil {
 		return "ERROR controld request failed: " + pyOSError(err)
 	}

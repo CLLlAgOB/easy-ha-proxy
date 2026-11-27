@@ -6,6 +6,7 @@ import (
 	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -71,24 +72,58 @@ func createPrivate(p string) (*os.File, error) {
 	return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|noFollow, 0o600)
 }
 
-func copyFrom(destination string, source string, offset int64) error {
-	in, err := os.Open(source)
+func decryptBackup(source, destination, password string) error {
+	in, err := os.OpenFile(source, os.O_RDONLY|noFollow, 0)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	if _, err := in.Seek(offset, io.SeekStart); err != nil {
+	header := make([]byte, encHeaderLen)
+	n, err := io.ReadFull(in, header)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return err
 	}
-	out, err := createPrivate(destination)
+	header = header[:n]
+	raw, err := os.CreateTemp(filepath.Dir(destination), ".backup-cipher-*")
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+	defer os.Remove(raw.Name())
+	defer raw.Close()
+	switch {
+	case bytes.HasPrefix(header, []byte(encMagic)):
+		if n != encHeaderLen {
+			return wrongPassphrase()
+		}
+		saltEnd := len(encMagic) + encSaltLen
+		key, err := deriveMACKey(password, header[len(encMagic):saltEnd])
+		if err != nil {
+			return err
+		}
+		mac := hmac.New(sha256.New, key)
+		mac.Write(header[:saltEnd])
+		// Authenticate the exact private copy passed to OpenSSL.
+		if _, err := io.Copy(io.MultiWriter(raw, mac), in); err != nil {
+			return err
+		}
+		if !hmac.Equal(mac.Sum(nil), header[saltEnd:]) {
+			return wrongPassphrase()
+		}
+	case bytes.HasPrefix(header, []byte("Salted__")):
+		fmt.Fprintln(term.stderr, "Warning: this legacy backup format does not authenticate its contents.")
+		if _, err := io.Copy(raw, io.MultiReader(bytes.NewReader(header), in)); err != nil {
+			return err
+		}
+	default:
+		return wrongPassphrase()
+	}
+	if err := raw.Close(); err != nil {
 		return err
 	}
-	return out.Close()
+	if err := runOpenSSLEnc(raw.Name(), destination, password, true); err != nil {
+		return err
+	}
+	return os.Chmod(destination, 0o600)
 }
 
 // opensslCrypt encrypts source into the EHP2 format at destination, or
@@ -96,45 +131,7 @@ func copyFrom(destination string, source string, offset int64) error {
 func opensslCrypt(source, destination, password string, decrypt bool) error {
 	dir, name := filepath.Dir(destination), filepath.Base(destination)
 	if decrypt {
-		header := make([]byte, encHeaderLen)
-		f, err := os.Open(source)
-		if err != nil {
-			return err
-		}
-		n, _ := io.ReadFull(f, header)
-		f.Close()
-		header = header[:n]
-		if bytes.HasPrefix(header, []byte(encMagic)) {
-			if n < encHeaderLen {
-				return wrongPassphrase()
-			}
-			salt := header[len(encMagic) : len(encMagic)+encSaltLen]
-			expected := header[len(encMagic)+encSaltLen:]
-			key, err := deriveMACKey(password, salt)
-			if err != nil {
-				return err
-			}
-			actual, err := streamMAC(key, header[:len(encMagic)+encSaltLen], source, int64(encHeaderLen))
-			if err != nil {
-				return err
-			}
-			if !hmac.Equal(actual, expected) {
-				return wrongPassphrase()
-			}
-			raw := filepath.Join(dir, fmt.Sprintf(".%s.cipher.%d", name, os.Getpid()))
-			defer os.Remove(raw)
-			if err := copyFrom(raw, source, int64(encHeaderLen)); err != nil {
-				return err
-			}
-			if err := runOpenSSLEnc(raw, destination, password, true); err != nil {
-				return err
-			}
-			return os.Chmod(destination, 0o600)
-		}
-		if err := runOpenSSLEnc(source, destination, password, true); err != nil {
-			return err
-		}
-		return os.Chmod(destination, 0o600)
+		return decryptBackup(source, destination, password)
 	}
 	raw := filepath.Join(dir, fmt.Sprintf(".%s.raw.%d", name, os.Getpid()))
 	defer os.Remove(raw)

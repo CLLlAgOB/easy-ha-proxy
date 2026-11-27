@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"golang.org/x/sys/unix"
 	"modernc.org/sqlite"
 )
 
@@ -120,8 +121,33 @@ func discardMetricsSnapshot(snapshot string) {
 // old database; left in place SQLite would replay it into the restored one.
 var installRestoredMetrics = func() (bool, error) {
 	snapshot, database := metricsSnapshot, metricsDatabase
-	if !isFile(snapshot) {
+	sourceDir, err := openRestoreDirectory(filepath.Dir(snapshot), 0)
+	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer sourceDir.Close()
+	sourceName := filepath.Base(snapshot)
+	fd, err := unix.Openat(int(sourceDir.Fd()), sourceName, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	file := os.NewFile(uintptr(fd), snapshot)
+	defer file.Close()
+	var expected unix.Stat_t
+	if err := unix.Fstat(fd, &expected); err != nil {
+		return false, err
+	}
+	if expected.Mode&unix.S_IFMT != unix.S_IFREG || expected.Nlink != 1 {
+		return false, backupErrorf("Monitoring history must be a regular file with a single link: %s", snapshot)
+	}
+	if err := file.Chmod(0o640); err != nil {
+		return false, err
 	}
 	running := false
 	if which("systemctl") {
@@ -137,19 +163,27 @@ var installRestoredMetrics = func() (bool, error) {
 			_, _ = run([]string{"systemctl", "start", metricsUnit}, runOptions{})
 		}
 	}()
-	if err := os.MkdirAll(filepath.Dir(database), 0o755); err != nil {
+	destDir, err := openRestoreDirectory(filepath.Dir(database), 0o755)
+	if err != nil {
 		return false, err
 	}
+	defer destDir.Close()
+	destFD, destName := int(destDir.Fd()), filepath.Base(database)
 	for _, suffix := range []string{"-wal", "-shm"} {
-		if err := os.Remove(database + suffix); err != nil && !os.IsNotExist(err) {
+		if err := unix.Unlinkat(destFD, destName+suffix, 0); err != nil && !os.IsNotExist(err) {
 			return false, err
 		}
 	}
-	if err := os.Rename(snapshot, database); err != nil {
+	if err := unix.Renameat(int(sourceDir.Fd()), sourceName, destFD, destName); err != nil {
 		return false, err
 	}
-	if err := os.Chmod(database, 0o640); err != nil {
+	var actual unix.Stat_t
+	if err := unix.Fstatat(destFD, destName, &actual, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return false, err
+	}
+	if actual.Dev != expected.Dev || actual.Ino != expected.Ino {
+		_ = unix.Unlinkat(destFD, destName, 0)
+		return false, backupErrorf("Monitoring history was replaced during restore")
 	}
 	fmt.Printf("Restored the monitoring history: %s\n", database)
 	return true, nil

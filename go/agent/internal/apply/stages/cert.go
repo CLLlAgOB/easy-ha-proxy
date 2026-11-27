@@ -460,7 +460,7 @@ func certRenew(b *Builder) []engine.Step {
 	// The block (NAT on, issue, assemble) and its always: (NAT off).
 	c.port = &engine.Command{Argv: []string{"ss", "-Hltn", "sport", "=", ":8000"}}
 	c.ipt4 = &engine.Command{Argv: []string{"iptables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-ports", "8000"}, IgnoreErrors: true}
-	c.ip6 = &engine.Command{Argv: []string{"bash", "-lc", "command -v ip6tables >/dev/null && echo yes || echo no"}}
+	c.ip6 = &engine.Command{Argv: []string{"bash", "-lc", "test -s /proc/net/if_inet6 && command -v ip6tables >/dev/null && echo yes || echo no"}}
 	c.ipt6 = &engine.Command{Argv: []string{"ip6tables", "-t", "nat", "-C", "PREROUTING", "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-ports", "8000"}, IgnoreErrors: true}
 	dnat := func(r *engine.Run) bool { return issuing(r) && c.bootstrap }
 	v6 := func(r *engine.Run) bool { return dnat(r) && strings.TrimRight(c.ip6.Output, "\n") == "yes" && ipv6 }
@@ -487,20 +487,16 @@ func certRenew(b *Builder) []engine.Step {
 				return nil, fmt.Errorf("Port 8000 is in use -- standalone Certbot cannot listen on :8000.")
 			}},
 		{Name: "Add IPv4 DNAT 80->8000 (check)", When: dnat, Resource: c.ipt4},
+		fact("Certbot IPv4 DNAT check succeeded", dnat, func() error { return exitIn01(c.ipt4) }),
 		{Name: "Add IPv4 DNAT 80->8000", When: func(r *engine.Run) bool { return dnat(r) && c.ipt4.Code == 1 },
 			Build: func(*engine.Run) (engine.Resource, error) {
-				if err := exitIn01(c.ipt4); err != nil {
-					return nil, err
-				}
 				return &engine.Command{Argv: []string{"iptables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-ports", "8000"}, Changes: true}, nil
 			}},
 		{Name: "Check ip6tables available", When: dnat, Resource: c.ip6},
 		{Name: "Add IPv6 DNAT 80->8000 (check)", When: v6, Resource: c.ipt6},
+		fact("Certbot IPv6 DNAT check succeeded", v6, func() error { return exitIn01(c.ipt6) }),
 		{Name: "Add IPv6 DNAT 80->8000", When: func(r *engine.Run) bool { return v6(r) && c.ipt6.Code == 1 },
 			Build: func(*engine.Run) (engine.Resource, error) {
-				if err := exitIn01(c.ipt6); err != nil {
-					return nil, err
-				}
 				return &engine.Command{Argv: []string{"ip6tables", "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-ports", "8000"}, Changes: true}, nil
 			}},
 	}
@@ -578,9 +574,11 @@ func certRenew(b *Builder) []engine.Step {
 		engine.Step{Name: "Remove IPv4 DNAT 80->8000 (if present)", When: always, Resource: del4},
 		// The last always: step also raises the block's failure, if any.
 		engine.Step{Name: "Remove IPv6 DNAT 80->8000 (if present)",
-			When: func(r *engine.Run) bool { return (always(r) && ipv6) || c.failed != nil },
+			When: func(r *engine.Run) bool {
+				return (always(r) && strings.TrimSpace(c.ip6.Output) == "yes" && ipv6) || c.failed != nil
+			},
 			Build: func(r *engine.Run) (engine.Resource, error) {
-				if !(always(r) && ipv6) {
+				if !(always(r) && strings.TrimSpace(c.ip6.Output) == "yes" && ipv6) {
 					return nil, c.failed
 				}
 				del6.then = c.failed

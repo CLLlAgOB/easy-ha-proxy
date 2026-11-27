@@ -16,14 +16,14 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"os/user"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,127}$`)
@@ -67,7 +67,7 @@ func BansdOptionsFromEnv() BansdOptions {
 		CommandTimeout:  time.Duration(envInt("AUTHELIA_BANS_COMMAND_TIMEOUT", 5, 1, 60)) * time.Second,
 		MaxRequestBytes: envInt("AUTHELIA_BANS_MAX_REQUEST_BYTES", 65536, 1024, 1048576),
 		MaxWorkers:      envInt("AUTHELIA_BANS_MAX_WORKERS", 4, 1, 16),
-		SocketGroup:     envDefault("AUTHELIA_BANS_SOCKET_GROUP", "haproxy-admin"),
+		SocketGroup:     envDefault("AUTHELIA_BANS_SOCKET_GROUP", "hadmin"),
 	}
 }
 
@@ -211,6 +211,7 @@ func (s *BansdServer) HandleRequest(ctx context.Context, req map[string]any) map
 
 // Serve accepts connections on ln until ctx is canceled.
 func (s *BansdServer) Serve(ctx context.Context, ln net.Listener) error {
+	ln = unixrpc.PanelListener(ln)
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 	defer func() { _ = ln.Close() }()
@@ -239,15 +240,10 @@ func (s *BansdServer) Serve(ctx context.Context, ln net.Listener) error {
 
 // RunBansd binds the authelia-bansd AF_UNIX socket and serves until SIGTERM/SIGINT.
 func RunBansd(opts BansdOptions) error {
-	if err := os.MkdirAll(filepath.Dir(opts.SocketPath), 0o750); err != nil {
-		return err
-	}
-	_ = os.Remove(opts.SocketPath)
-	ln, err := net.Listen("unix", opts.SocketPath)
+	ln, err := unixrpc.ListenUnix(opts.SocketPath, "", opts.SocketGroup, 0o660)
 	if err != nil {
 		return err
 	}
-	setBansSocketPerms(opts.SocketPath, opts.SocketGroup)
 	defer os.Remove(opts.SocketPath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -290,20 +286,6 @@ func writeLineJSON(conn net.Conn, payload map[string]any) {
 	}
 	raw = append(raw, '\n')
 	_, _ = conn.Write(raw)
-}
-
-// setBansSocketPerms is set_socket_perms: root:<group>, mode 0660.
-func setBansSocketPerms(path, group string) {
-	gid := os.Getgid()
-	if g, err := user.LookupGroup(group); err == nil {
-		if n, err := strconv.Atoi(g.Gid); err == nil {
-			gid = n
-		}
-	} else {
-		log.Printf("group %s not found, leaving socket group as root", group)
-	}
-	_ = os.Chown(path, 0, gid)
-	_ = os.Chmod(path, 0o660)
 }
 
 // jsonToPy turns encoding/json values into the shapes pyStr understands.

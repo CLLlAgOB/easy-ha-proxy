@@ -31,6 +31,7 @@ import (
 	"golang.org/x/crypto/argon2"
 
 	"easy-ha-proxy/panel/shared/pyyaml"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/unixrpc"
 )
 
 // UsersdOptions holds what authelia-usersd.py reads from the environment.
@@ -660,6 +661,7 @@ func (u *Usersd) serveConn(conn net.Conn) {
 
 // Serve accepts connections on ln one at a time until ctx is canceled or ln fails.
 func (u *Usersd) Serve(ctx context.Context, ln net.Listener) error {
+	ln = unixrpc.PanelListener(ln)
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
 	for {

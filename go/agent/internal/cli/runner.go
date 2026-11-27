@@ -150,13 +150,26 @@ func FetchRunner(out io.Writer, directory string) (string, error) {
 	return fetchRunnerFn(out, directory)
 }
 
-func defaultFetchRunner(out io.Writer, directory string) (string, error) {
-	src := SourceDir()
-	res := runSubprocess("git", "-c", "safe.directory="+src, "-C", src, "rev-parse", "HEAD")
-	revision := strings.TrimSpace(res.Stdout)
-	if !sourceRevisionRe.MatchString(revision) {
-		revision = ""
+func sourceTreeRevision(src string) string {
+	if _, err := os.Stat(filepath.Join(src, ".git")); err == nil {
+		res := runSubprocess("git", "-c", "safe.directory="+src, "-C", src, "rev-parse", "HEAD")
+		revision := strings.TrimSpace(res.Stdout)
+		if res.Err == nil && res.ExitCode == 0 && sourceRevisionRe.MatchString(revision) {
+			return revision
+		}
 	}
+	if raw, err := os.ReadFile(filepath.Join(src, ".easy-ha-proxy-source-revision")); err == nil {
+		for line := range strings.SplitSeq(string(raw), "\n") {
+			if value, ok := strings.CutPrefix(strings.TrimSpace(line), "revision="); ok && sourceRevisionRe.MatchString(strings.TrimSpace(value)) {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return ""
+}
+
+func defaultFetchRunner(out io.Writer, directory string) (string, error) {
+	revision := sourceTreeRevision(SourceDir())
 	varsFile := filepath.Join(directory, "vars.yml")
 	variables := map[string]any{}
 	if isRegularFile(varsFile) {
@@ -173,9 +186,12 @@ func defaultFetchRunner(out io.Writer, directory string) (string, error) {
 	}
 	binary, err := BundleAgent(variables, "")
 	if err == nil && binary == nil && reference != "" {
-		binary, err = DockerAgent(reference, revision)
-		if err == nil && binary == nil {
-			binary, err = FetchAgent(reference, revision, "")
+		var verify func(string) error
+		if verify, err = nativeSignatureVerifier(variables); err == nil {
+			binary, err = dockerAgent(reference, revision, verify)
+			if err == nil && binary == nil {
+				binary, err = fetchAgent(reference, revision, "", verify)
+			}
 		}
 	}
 	if err == nil && binary == nil {

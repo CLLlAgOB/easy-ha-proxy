@@ -322,12 +322,12 @@ func PrepareLegacyConfig(liveDir, controllerDir, outputDir string, stdout io.Wri
 	metadata.Set("migration_source", liveDir)
 	metadata.Set("migration_mode", "legacy_snapshot")
 
-	tmpDir := filepath.Join(filepath.Dir(outputDir), fmt.Sprintf(".%s.tmp-%d", filepath.Base(outputDir), os.Getpid()))
-	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+	parent := filepath.Dir(outputDir)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmpDir, 0o700); err != nil {
-		_ = os.RemoveAll(tmpDir)
+	tmpDir, err := os.MkdirTemp(parent, "."+filepath.Base(outputDir)+".tmp-*")
+	if err != nil {
 		return err
 	}
 	cleanup := true

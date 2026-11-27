@@ -218,7 +218,7 @@ func ParseConfigMap(raw map[string]any) Config {
 	return cfg
 }
 
-// SaveConfig atomically writes alertd.json with mode 0640 and fsync.
+// SaveConfig atomically writes alertd.json with mode 0600 and fsync.
 func SaveConfig(path string, cfg Config) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -245,7 +245,7 @@ func SaveConfig(path string, cfg Config) error {
 		cleanup()
 		return err
 	}
-	if err := tmp.Chmod(0o640); err != nil {
+	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		cleanup()
 		return err

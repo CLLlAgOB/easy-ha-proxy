@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/certrestore"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
@@ -42,6 +43,10 @@ func (d *Daemon) handleCertsBackup(_ map[string]any) (int, map[string]any) {
 		})
 		sortPathsLikePython(files)
 		for _, path := range files {
+			rel, _ := filepath.Rel(base, path)
+			if strict && !certrestore.AllowedCAPath(strings.Split(rel, string(filepath.Separator))) {
+				continue
+			}
 			if _, err := ensureWithin(base, path); err != nil {
 				if strict {
 					return err
@@ -59,7 +64,6 @@ func (d *Daemon) handleCertsBackup(_ map[string]any) (int, map[string]any) {
 			if fi.Size()+int64(buf.Len()) > d.Opts.MaxArchiveBytes {
 				return vErr("certificate backup exceeds the configured limit")
 			}
-			rel, _ := filepath.Rel(base, path)
 			header, err := zip.FileInfoHeader(fi)
 			if err != nil {
 				return err
@@ -119,18 +123,6 @@ func sortPathsLikePython(paths []string) {
 			paths[j], paths[j-1] = paths[j-1], paths[j]
 		}
 	}
-}
-
-var allowedLERestoreDirs = map[string]bool{"accounts": true, "archive": true, "live": true, "renewal": true, "keys": true, "csr": true}
-
-func allowedLERestoreRel(parts []string) bool {
-	if len(parts) < 2 || !allowedLERestoreDirs[parts[0]] {
-		return false
-	}
-	if parts[0] == "renewal" {
-		return len(parts) == 2 && strings.HasSuffix(parts[1], ".conf") && !strings.HasPrefix(parts[1], ".")
-	}
-	return true
 }
 
 func pathParts(name string) ([]string, bool) {
@@ -232,28 +224,26 @@ func (d *Daemon) handleCertsRestore(body map[string]any) (int, map[string]any) {
 		}
 		top, rel := parts[0], parts[1:]
 		var base string
-		isHAProxy := false
 		switch top {
 		case hapTop:
 			if len(rel) != 1 || !strings.HasSuffix(rel[0], ".pem") || strings.HasPrefix(rel[0], ".") {
 				skipped++
 				continue
 			}
-			base, isHAProxy = hapDir, true
+			base = hapDir
 		case leTop:
-			if !allowedLERestoreRel(rel) {
+			if !certrestore.AllowedLEPath(rel) {
 				skipped++
 				continue
 			}
 			base = leRoot
 		case caTop:
+			if !certrestore.AllowedCAPath(rel) {
+				skipped++
+				continue
+			}
 			base = caRoot
 		default:
-			skipped++
-			continue
-		}
-		target, err := ensureWithin(base, filepath.Join(append([]string{base}, rel...)...))
-		if err != nil {
 			skipped++
 			continue
 		}
@@ -266,12 +256,22 @@ func (d *Daemon) handleCertsRestore(body map[string]any) (int, map[string]any) {
 			continue
 		}
 		budget -= int64(len(data))
-		if top == leTop && rel[0] == "renewal" && hookKeyRe.Match(data) {
-			log.Printf("Refused certbot renewal config containing hook directive: %s", strings.Join(rel, "/"))
+		if top == leTop && rel[0] == "renewal" && !certrestore.SafeRenewal(data, leRoot, d.Opts.DNSCredentialsDir, strings.TrimSuffix(rel[1], ".conf")) {
+			log.Printf("Refused unsafe Certbot renewal config: %s", strings.Join(rel, "/"))
 			skipped++
 			continue
 		}
 		writeErr := func() error {
+			switch top {
+			case leTop:
+				return certrestore.WriteLEFile(base, rel, data)
+			case caTop:
+				return certrestore.WriteCAFile(base, rel, data)
+			}
+			target, err := ensureWithin(base, filepath.Join(base, rel[0]))
+			if err != nil {
+				return err
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}
@@ -287,18 +287,7 @@ func (d *Daemon) handleCertsRestore(body map[string]any) (int, map[string]any) {
 			if err := fh.Close(); err != nil {
 				return err
 			}
-			switch {
-			case isHAProxy:
-				return setCertPermissions(target)
-			case base == caRoot:
-				mode := os.FileMode(0o644)
-				if filepath.Base(target) == "ca.key" {
-					mode = 0o600
-				}
-				return os.Chmod(target, mode)
-			default:
-				return os.Chmod(target, 0o600)
-			}
+			return setCertPermissions(target)
 		}()
 		if writeErr != nil {
 			skipped++

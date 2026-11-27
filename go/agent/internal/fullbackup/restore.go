@@ -1,12 +1,16 @@
 package fullbackup
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 type restoreOptions struct {
@@ -26,26 +30,55 @@ type keyFile struct {
 	uid, gid int
 }
 
-// readRegularNoFollow reads a regular file without following a link; ok
-// false when it is missing, a link or not regular.
-func readRegularNoFollow(p string) (string, *syscall.Stat_t, bool) {
-	if isSymlink(p) {
-		return "", nil, false
-	}
-	f, err := os.OpenFile(p, os.O_RDONLY|noFollow, 0)
+// openRestoreDirectory pins a directory and refuses symlinks at every component.
+func openRestoreDirectory(p string, createMode uint32) (*os.File, error) {
+	p, err := filepath.Abs(p)
 	if err != nil {
-		return "", nil, false
+		return nil, err
 	}
+	const flags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	fd, err := unix.Open("/", flags, 0)
+	if err != nil {
+		return nil, err
+	}
+	for part := range strings.SplitSeq(strings.TrimPrefix(p, "/"), "/") {
+		if part == "" {
+			continue
+		}
+		next, err := unix.Openat(fd, part, flags, 0)
+		if createMode != 0 && errors.Is(err, unix.ENOENT) {
+			if err = unix.Mkdirat(fd, part, createMode); err == nil || errors.Is(err, unix.EEXIST) {
+				next, err = unix.Openat(fd, part, flags, 0)
+			}
+		}
+		_ = unix.Close(fd)
+		if err != nil {
+			return nil, &os.PathError{Op: "open restore directory", Path: p, Err: err}
+		}
+		fd = next
+	}
+	return os.NewFile(uintptr(fd), p), nil
+}
+
+func readRegularNoFollow(dir *os.File, name string) (string, *syscall.Stat_t, error) {
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return "", nil, err
+	}
+	f := os.NewFile(uintptr(fd), name)
 	defer f.Close()
 	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() {
-		return "", nil, false
-	}
-	raw, err := os.ReadFile(p)
 	if err != nil {
-		return "", nil, false
+		return "", nil, err
 	}
-	return string(raw), fi.Sys().(*syscall.Stat_t), true
+	if !fi.Mode().IsRegular() {
+		return "", nil, backupErrorf("Not a regular file: %s", filepath.Join(dir.Name(), name))
+	}
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		return "", nil, err
+	}
+	return string(raw), fi.Sys().(*syscall.Stat_t), nil
 }
 
 func nonEmptyLines(text string) []string {
@@ -64,8 +97,13 @@ func currentAuthorizedKeys() map[string]keyFile {
 	more, _ := filepath.Glob(authorizedKeysGlob)
 	candidates = append(candidates, more...)
 	for _, p := range candidates {
-		text, st, ok := readRegularNoFollow(p)
-		if !ok {
+		dir, err := openRestoreDirectory(filepath.Dir(p), 0)
+		if err != nil {
+			continue
+		}
+		text, st, err := readRegularNoFollow(dir, filepath.Base(p))
+		_ = dir.Close()
+		if err != nil {
 			continue
 		}
 		saved[p] = keyFile{nonEmptyLines(text), int(st.Uid), int(st.Gid)}
@@ -77,54 +115,54 @@ func currentAuthorizedKeys() map[string]keyFile {
 // beside the restored ones.
 var mergeAuthorizedKeys = func(saved map[string]keyFile) error {
 	for _, p := range sortedKeyFiles(saved) {
-		old := saved[p]
-		if isSymlink(p) || isSymlink(filepath.Dir(p)) {
-			return backupErrorf("Refusing to merge symlinked authorized_keys: %s", p)
-		}
-		var restored []string
-		if text, _, ok := readRegularNoFollow(p); ok {
-			restored = nonEmptyLines(text)
-		}
-		seen := map[string]bool{}
-		var merged []string
-		for _, line := range append(restored, old.lines...) {
-			if !seen[line] {
-				seen[line] = true
-				merged = append(merged, line)
-			}
-		}
-		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-			return err
-		}
-		tmp, err := os.CreateTemp(filepath.Dir(p), ".authorized_keys.*.tmp")
-		if err != nil {
-			return err
-		}
-		err = func() error {
-			if _, err := tmp.WriteString(strings.Join(merged, "\n") + "\n"); err != nil {
-				return err
-			}
-			if err := tmp.Chmod(0o600); err != nil {
-				return err
-			}
-			if err := tmp.Chown(old.uid, old.gid); err != nil {
-				return err
-			}
-			return tmp.Sync()
-		}()
-		closeErr := tmp.Close()
-		if err == nil {
-			err = closeErr
-		}
-		if err == nil {
-			err = os.Rename(tmp.Name(), p)
-		}
-		if err != nil {
-			_ = os.Remove(tmp.Name())
-			return err
+		if err := mergeKeyFile(p, saved[p]); err != nil {
+			return fmt.Errorf("merge authorized_keys %s: %w", p, err)
 		}
 	}
 	return nil
+}
+
+func mergeKeyFile(p string, old keyFile) error {
+	dir, err := openRestoreDirectory(filepath.Dir(p), 0o700)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	name := filepath.Base(p)
+	text, _, err := readRegularNoFollow(dir, name)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	seen := map[string]bool{}
+	var merged []string
+	for _, line := range append(nonEmptyLines(text), old.lines...) {
+		if !seen[line] {
+			seen[line] = true
+			merged = append(merged, line)
+		}
+	}
+	dirFD := int(dir.Fd())
+	tempName := ".authorized_keys." + rand.Text() + ".tmp"
+	fd, err := unix.Openat(dirFD, tempName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return err
+	}
+	tmp := os.NewFile(uintptr(fd), tempName)
+	defer unix.Unlinkat(dirFD, tempName, 0)
+	defer tmp.Close()
+	if _, err := tmp.WriteString(strings.Join(merged, "\n") + "\n"); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if err := tmp.Chown(old.uid, old.gid); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	return unix.Renameat(dirFD, tempName, dirFD, name)
 }
 
 func sortedKeyFiles(saved map[string]keyFile) []string {
@@ -488,7 +526,7 @@ var activateRecoverySource = func() (string, error) {
 	if err := copyTreeKeepingLinks(recovery, staged); err != nil {
 		return "", err
 	}
-	if _, err := run([]string{"chown", "-R", "root:root", staged}, runOptions{check: true}); err != nil {
+	if _, err := run([]string{"chown", "-hR", "root:root", staged}, runOptions{check: true}); err != nil {
 		return "", err
 	}
 	if err := os.Chmod(staged, 0o755); err != nil {

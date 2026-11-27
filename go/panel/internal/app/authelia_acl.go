@@ -233,6 +233,7 @@ func itsLoads(secret []byte, salt, token string) (any, bool) {
 		if err != nil {
 			return nil, false
 		}
+		defer zr.Close()
 		if raw, err = io.ReadAll(zr); err != nil {
 			return nil, false
 		}

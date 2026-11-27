@@ -4,6 +4,7 @@ Description=HAProxy certificate helper (root, Unix socket)
 After=network.target
 
 [Service]
+Environment="EASY_HA_PROXY_PANEL_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
 Type=simple
 User=root
 Group={{ app_group }}

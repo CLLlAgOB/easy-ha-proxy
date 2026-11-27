@@ -457,6 +457,29 @@ func TestTheKeysThatCouldLogInBeforeAreKept(t *testing.T) {
 	}
 }
 
+func TestAuthorizedKeysRefuseSymlinkedHome(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "unrelated")
+	target := filepath.Join(outside, ".ssh", "authorized_keys")
+	writeText(t, target, "ssh-ed25519 untouched\n")
+	home := filepath.Join(root, "operator")
+	if err := os.Symlink(outside, home); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	swap(t, &rootAuthorizedKeys, keys)
+	swap(t, &authorizedKeysGlob, filepath.Join(root, "unmatched", "*", "authorized_keys"))
+	if saved := currentAuthorizedKeys(); len(saved) != 0 {
+		t.Fatal("saved keys through a symlinked home directory")
+	}
+	if err := mergeAuthorizedKeys(map[string]keyFile{keys: {lines: []string{"ssh-ed25519 operator"}}}); err == nil {
+		t.Fatal("merged keys through a symlinked home directory")
+	}
+	if readText(t, target) != "ssh-ed25519 untouched\n" {
+		t.Fatal("modified the symlink target")
+	}
+}
+
 // A failed configuration-scope restore leaves the fixed roots as they were,
 // including one the attempt created.
 

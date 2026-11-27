@@ -562,6 +562,9 @@ func (ctx *context) renderFor(t *Template, x *forNode, f *frame, out *strings.Bu
 		lf := f.child()
 		var kept []any
 		for _, it := range items {
+			if err := ctx.budget.step(); err != nil {
+				return wrapErr(t, x.line, err)
+			}
 			if err := ctx.assignTarget(x.target, it, lf); err != nil {
 				return err
 			}

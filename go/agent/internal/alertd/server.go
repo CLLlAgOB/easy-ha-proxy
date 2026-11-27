@@ -302,5 +302,5 @@ func Run(opts DaemonOptions) error {
 	}
 	log.Printf("easy-ha-proxy-alertd (Go) listening on %s rules=%d enabled=%v", opts.SocketPath, len(Rules), cfg.Enabled)
 
-	return unixrpc.ServeHTTP(ctx, httpSrv, ln, 45*time.Second)
+	return unixrpc.ServeHTTP(ctx, httpSrv, unixrpc.PanelListener(ln), 45*time.Second)
 }
