@@ -24,15 +24,18 @@ jobs:
         with:
           go-version-file: go/agent/go.mod
           cache: false
-      - name: Build the agent
+      - name: Build the agent and the UDP smoke
         working-directory: go/agent
-        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/easy-ha-proxy-agent" ./cmd/easy-ha-proxy-agent
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/easy-ha-proxy-agent" ./cmd/easy-ha-proxy-agent
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/udp-forward-smoke" ./cmd/udp-forward-smoke
       - name: Exercise mixed legacy and nft filters in a disposable gateway
         run: |
           docker run --rm --privileged \
-            -v "$GITHUB_WORKSPACE:/src:ro" -v "$RUNNER_TEMP/easy-ha-proxy-agent:/usr/local/sbin/easy-ha-proxy-agent:ro" \
-            -e AGENT_BIN=/usr/local/sbin/easy-ha-proxy-agent python:3.12 \
-            bash -lc 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq iptables iproute2 ipset >/dev/null && /usr/bin/python3 /src/.tests/integration/udp_forward_smoke.py'
+            -v "$RUNNER_TEMP/easy-ha-proxy-agent:/usr/local/sbin/easy-ha-proxy-agent:ro" \
+            -v "$RUNNER_TEMP/udp-forward-smoke:/usr/local/bin/udp-forward-smoke:ro" \
+            -e AGENT_BIN=/usr/local/sbin/easy-ha-proxy-agent debian:bookworm-slim \
+            bash -lc 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq iptables iproute2 ipset >/dev/null && /usr/local/bin/udp-forward-smoke'
 
   server-state:
     name: HAProxy server-state restoration
