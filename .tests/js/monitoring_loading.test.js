@@ -10,35 +10,70 @@ function deferred() {
   return { promise, resolve };
 }
 
-test("monitoring draws a ready chart before slow series, tables, and events", async () => {
-  // Exercise the page's request ordering with controlled responses.
-  const source = fs.readFileSync(path.join(__dirname, "../../go/panel/web/static/js/monitoring.js"), "utf8");
-  const start = source.indexOf("  async function loadAll(options) {");
-  assert.notEqual(start, -1);
-  const end = source.indexOf("\n  }", start) + "\n  }".length;
-  const latency = deferred();
-  const timeline = deferred();
-  const events = deferred();
-  const series = { points: [60], resolution_seconds: 60 };
-  const draws = [];
+const source = fs.readFileSync(path.join(__dirname, "../../go/panel/web/static/js/monitoring.js"), "utf8");
+const loaders = ["loadNearCharts", "loadOneChart", "loadAll"].map((name) => {
+  const start = source.search(new RegExp(`^  (?:async )?function ${name}\\(`, "m"));
+  assert.notEqual(start, -1, name);
+  return source.slice(start, source.indexOf("\n  }", start) + "\n  }".length);
+}).join("\n");
+const settle = () => new Promise(setImmediate);
+const series = { points: [60], resolution_seconds: 60 };
+
+function monitoringPage(overrides) {
   const noop = () => {};
-  const page = {
+  const page = vm.createContext({
+    AbortController,
     CHARTS: [{ name: "requests" }, { name: "latency" }],
     inFlight: false,
     zoomDragging: false,
-    currentRange: "1y",
+    sharedReading: null,
+    currentRange: "1h",
     currentSite: "",
     customWindow: null,
-    chartsView: "",
-    chartsFetchedAt: 0,
-    showEvents: true,
+    chartSession: null,
+    reloadPending: false,
+    LONG_RANGE_REFRESH_SECONDS: 300,
+    showEvents: false,
     eventsState: null,
     lastCharts: {},
-    rangeSeconds: () => 365 * 86400,
+    rangeSeconds: () => 3600,
     windowParams: () => ({}),
     eventsParams: () => ({}),
-    chartPlan: (chart) => ({ from: null, query: { chart: chart.name } }),
+    chartPlan: (chart, session) => ({ from: null, query: { ...session.params, chart: chart.name } }),
+    chartNearViewport: () => true,
     chartOn: () => true,
+    monitorOn: () => false,
+    getJson: () => Promise.resolve({}),
+    redrawChart: noop,
+    backendsView: "availability",
+    byId: noop,
+    clearReadings: noop,
+    writeAddress: noop,
+    updateLogLinks: noop,
+    showUnavailable(unavailable) { assert.equal(unavailable, false); },
+    noteWindowSkew: noop,
+    applyMonitors: noop,
+    renderSummary: noop,
+    renderStorage: noop,
+    renderTimeline: noop,
+    renderAttention: noop,
+    renderEventsCount: noop,
+    formatCount: String,
+    uiText: String,
+    setText: noop,
+    ...overrides,
+  });
+  vm.runInContext(loaders, page);
+  return page;
+}
+
+test("monitoring draws a ready chart before slow series, tables, and events", async () => {
+  const latency = deferred();
+  const timeline = deferred();
+  const events = deferred();
+  const draws = [];
+  const page = monitoringPage({
+    showEvents: true,
     monitorOn: (name) => name === "availability",
     getJson(route, params) {
       switch (route) {
@@ -51,29 +86,14 @@ test("monitoring draws a ready chart before slow series, tables, and events", as
       }
     },
     redrawChart(name) { draws.push([name, page.eventsState]); },
-    backendsView: "availability",
-    clearReadings: noop,
-    writeAddress: noop,
-    updateLogLinks: noop,
-    showUnavailable: noop,
-    noteWindowSkew: noop,
-    applyMonitors: noop,
-    renderSummary: noop,
-    renderStorage: noop,
-    renderTimeline: noop,
-    renderAttention: noop,
-    renderEventsCount: noop,
-    formatCount: String,
-    uiText: String,
-    setText: noop,
-  };
-  const loaded = vm.runInNewContext(source.slice(start, end) + "\nloadAll();", page);
-  await new Promise(setImmediate);
+  });
+  const loaded = vm.runInContext("loadAll()", page);
+  await settle();
   assert.deepEqual(draws, [["requests", null]]);
 
   const overlay = { events: [{ ts: 60 }] };
   events.resolve(overlay);
-  await new Promise(setImmediate);
+  await settle();
   assert.deepEqual(draws, [["requests", null], ["requests", overlay]]);
 
   latency.resolve(series);
@@ -81,4 +101,50 @@ test("monitoring draws a ready chart before slow series, tables, and events", as
   await loaded;
   assert.deepEqual(draws.at(-1), ["latency", overlay]);
   assert.equal(page.inFlight, false);
+});
+
+test("monitoring fetches charts on approach and refreshes only nearby charts", async () => {
+  const names = [];
+  const visible = new Set(["requests"]);
+  const page = monitoringPage({
+    chartNearViewport: (name) => visible.has(name),
+    getJson(route, params) {
+      if (route !== "/api/monitoring/series") return Promise.resolve({});
+      names.push(params.chart);
+      return Promise.resolve(series);
+    },
+  });
+  await vm.runInContext("loadAll()", page);
+  assert.deepEqual(names, ["requests"]);
+
+  visible.delete("requests");
+  visible.add("latency");
+  await vm.runInContext("Promise.all([loadNearCharts(), loadNearCharts()])", page);
+  assert.deepEqual(names, ["requests", "latency"]);
+  assert.equal(page.lastCharts.latency.payload, series);
+
+  await vm.runInContext("loadAll({refresh: true})", page);
+  assert.deepEqual(names, ["requests", "latency", "latency"]);
+});
+
+test("monitoring discards a pending series when the user changes site", async () => {
+  const old = deferred();
+  const drawn = [];
+  const page = monitoringPage({
+    currentSite: "old",
+    chartNearViewport: (name) => name === "requests",
+    getJson(route, params) {
+      if (route !== "/api/monitoring/series") return Promise.resolve({});
+      return params.site === "old" ? old.promise : Promise.resolve(series);
+    },
+    redrawChart(name) { drawn.push([name, page.lastCharts[name].view]); },
+  });
+  const oldLoad = vm.runInContext("loadAll()", page);
+  await settle();
+  page.currentSite = "new";
+  await vm.runInContext("loadAll()", page);
+  old.resolve(series);
+  await oldLoad;
+  await settle();
+  assert.deepEqual(drawn, [["requests", "1h|new|"]]);
 });

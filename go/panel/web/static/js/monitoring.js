@@ -33,6 +33,7 @@
 
   const SVG_NS = "http://www.w3.org/2000/svg";
   const REFRESH_INTERVAL_MS = 30000;
+  const CHART_PREFETCH_MARGIN = 240;
   // Hourly rows change once an hour: a week or more is redrawn this often.
   const LONG_RANGE_REFRESH_SECONDS = 300;
 
@@ -851,28 +852,15 @@
 
   function hasComponents(name) {
     const last = lastCharts[name];
-    return Boolean(last && last.payload && Array.isArray(last.payload.components));
+    return Boolean(last && chartSession && last.view === chartSession.view && Array.isArray(last.payload.components));
   }
 
   // Fetch one chart again, with its lines per component, once the list is
   // opened or the chart goes full screen.
-  async function loadComponents(name) {
+  function loadComponents(name) {
     const chart = CHARTS.find((item) => item.name === name);
-    if (!chart || !chart.components || hasComponents(name)) return;
-    const params = Object.assign({ range: currentRange }, windowParams());
-    if (currentSite) params.site = currentSite;
-    try {
-      const payload = await getJson(
-        "/api/monitoring/series",
-        Object.assign({ chart: name, components: "1" }, params)
-      );
-      const seconds = customWindow
-        ? customWindow.until - customWindow.since
-        : rangeSeconds(currentRange);
-      lastCharts[name] = { payload: payload, seconds: seconds };
-      redrawChart(name);
-    } catch (error) {
-      /* the chart keeps what it had; the next refresh tries again */
+    if (chartSession && chart && chart.components && wantsComponents(name) && !hasComponents(name)) {
+      loadOneChart(chart, chartSession, false);
     }
   }
 
@@ -1341,11 +1329,12 @@
 
   /* ---------- data loading ---------- */
 
-  async function getJson(path, params) {
+  async function getJson(path, params, signal) {
     const query = new URLSearchParams(params || {});
     const response = await fetch(`${path}?${query.toString()}`, {
       headers: { Accept: "application/json" },
-      credentials: "same-origin"
+      credentials: "same-origin",
+      signal: signal
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -1810,7 +1799,7 @@
     const svg = byId(`mon-plot-${name}`);
     if (!chart || !svg) return;
     const last = lastCharts[name];
-    if (!last) {
+    if (!last || (chartSession && last.view !== chartSession.view)) {
       drawEmpty(svg, uiText("No data for this period"));
       return;
     }
@@ -1885,10 +1874,10 @@
     }
     if (expandedChart) {
       redrawChart(expandedChart);
-      loadComponents(expandedChart);
       const button = card.querySelector(".mon-expand");
       if (button) button.focus();
     }
+    loadNearCharts();
   }
 
   function bindFullScreen() {
@@ -1922,35 +1911,99 @@
     if (wanted && CHARTS.some((chart) => chart.name === wanted[1])) setExpanded(wanted[1]);
   }
 
-  // What the charts on show were drawn for; a refresh of the same view only
-  // fetches what is new.
-  let chartsView = "";
-  let chartsFetchedAt = 0;
+  // The active site and period, shared by the first load, scrolling and the
+  // full-screen view. A chart can be requested once for each needed detail level.
+  let chartSession = null;
+  let reloadPending = false;
+  let chartObserver = null;
+
+  function chartNearViewport(name) {
+    if (expandedChart) return name === expandedChart;
+    if (!chartObserver) return true;
+    const card = document.querySelector(`.mon-chart[data-chart="${name}"]`);
+    if (!card) return false;
+    const box = card.getBoundingClientRect();
+    return box.height > 0 && box.bottom >= -CHART_PREFETCH_MARGIN &&
+      box.top <= window.innerHeight + CHART_PREFETCH_MARGIN;
+  }
+
+  function watchCharts() {
+    if (!window.IntersectionObserver) return;
+    chartObserver = new window.IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadNearCharts();
+    }, { rootMargin: `${CHART_PREFETCH_MARGIN}px 0px` });
+    document.querySelectorAll(".mon-chart[data-chart]").forEach((card) => chartObserver.observe(card));
+  }
 
   // How one chart is fetched on this pass: whole, or -- on a refresh of a
   // window of minutes -- from its last slot on, to be joined to what it has.
-  function chartPlan(chart, params, seconds, refreshing, now) {
-    if (!chartOn(chart.name)) return null;
-    const query = Object.assign({ chart: chart.name }, params);
+  function chartPlan(chart, session, refreshing) {
+    const query = Object.assign({ chart: chart.name }, session.params);
     const wanted = chart.components && wantsComponents(chart.name);
     if (chart.components) query.components = wanted ? "1" : "0";
     const last = lastCharts[chart.name];
     const points = (last && last.payload && last.payload.points) || [];
     const joinable =
       refreshing &&
-      !customWindow &&
+      last && last.view === session.view &&
+      !session.explicitWindow &&
       !wanted &&
-      seconds <= 86400 &&
+      session.seconds <= 86400 &&
       points.length > 0 &&
       Number(last.payload.resolution_seconds) === 60;
     if (!joinable) return { query: query, from: null };
     // The last slot again -- it was still filling -- and at least two
     // minutes, the shortest window the server takes.
-    const from = Math.min(Number(points[points.length - 1]), now - 120);
-    const fresh = { chart: chart.name, since: from, until: now };
-    if (currentSite) fresh.site = currentSite;
+    const from = Math.min(Number(points[points.length - 1]), session.now - 120);
+    const fresh = { chart: chart.name, since: from, until: session.now };
+    if (session.params.site) fresh.site = session.params.site;
     if (chart.components) fresh.components = "0";
     return { query: fresh, from: from };
+  }
+
+  function loadNearCharts(session = chartSession, refresh = false) {
+    if (!session || session !== chartSession || reloadPending) return;
+    return Promise.all(CHARTS.filter((chart) => chartNearViewport(chart.name))
+      .map((chart) => loadOneChart(chart, session, refresh)));
+  }
+
+  function loadOneChart(chart, session, refresh) {
+    const name = chart.name;
+    if (reloadPending || session !== chartSession || !chartOn(name)) return;
+    const cached = lastCharts[name];
+    const current = cached && cached.view === session.view;
+    const components = Boolean(chart.components && wantsComponents(name));
+    if (current && (!components || hasComponents(name))) {
+      if (!refresh || (session.automatic && (session.past ||
+          (session.longPreset && session.now - cached.fetchedAt < LONG_RANGE_REFRESH_SECONDS)))) return;
+    }
+    const previous = session.requests.get(name);
+    if (previous && (!components || previous.components)) return previous.promise;
+
+    if (!current) {
+      const svg = byId(`mon-plot-${name}`);
+      if (svg) drawEmpty(svg, uiText("Loading…"));
+    }
+    const plan = chartPlan(chart, session, refresh && session.automatic);
+    const request = getJson("/api/monitoring/series", plan.query, session.controller.signal).catch(() => null);
+    const entry = { components: components };
+    entry.promise = Promise.all([request, session.settings]).then(([answer, ready]) => {
+      if (!ready || reloadPending || session !== chartSession || session.requests.get(name) !== entry || !chartOn(name)) return;
+      if (!answer && current) return;
+      const payload = answer && plan.from !== null
+        ? core.mergeSeries(cached.payload, answer, plan.from, Number(answer.until || session.now) - session.seconds)
+        : answer;
+      lastCharts[name] = payload ? { payload: payload, seconds: session.seconds, view: session.view, fetchedAt: session.now } : null;
+      redrawChart(name);
+      if (!payload) return;
+      if (name === "requests" || !session.hasResolution) {
+        const step = Number(payload.resolution_seconds) || 60;
+        setText("mon-resolution", `${uiText("Resolution")}: ${formatCount(step / 60)} ${uiText("min")}`);
+        session.hasResolution = true;
+      }
+    });
+    session.requests.set(name, entry);
+    return entry.promise;
   }
 
   // The view in the address, so a reload -- or a link sent to a colleague
@@ -1992,8 +2045,16 @@
 
   async function loadAll(options) {
     // A refresh redraws the charts, which would drop a selection in progress.
-    if (inFlight || zoomDragging || (options && options.refresh && sharedReading)) return;
-    if (!options || !options.refresh) clearReadings();
+    const automatic = Boolean(options && options.refresh);
+    if (zoomDragging || (automatic && sharedReading)) return;
+    if (inFlight) {
+      if (!automatic) {
+        reloadPending = true;
+        if (chartSession) chartSession.controller.abort();
+      }
+      return;
+    }
+    if (!automatic) clearReadings();
     inFlight = true;
     writeAddress();
     updateLogLinks();
@@ -2004,22 +2065,36 @@
       : rangeSeconds(currentRange);
     const now = Math.floor(Date.now() / 1000);
     const view = [currentRange, currentSite, customWindow ? `${customWindow.since}-${customWindow.until}` : ""].join("|");
-    const refreshing = Boolean(options && options.refresh) && view === chartsView;
-    // A period that has ended does not change; a week or more changes hourly.
-    let chartsDue = true;
-    if (refreshing && customWindow && customWindow.until < now - 120) chartsDue = false;
-    if (refreshing && !customWindow && seconds > 86400 && now - chartsFetchedAt < LONG_RANGE_REFRESH_SECONDS) {
-      chartsDue = false;
-    }
-    const plans = CHARTS.map((chart) => chartPlan(chart, params, seconds, refreshing, now));
+    const sameView = chartSession && view === chartSession.view;
+    const session = {
+      params: params, seconds: seconds, now: now, view: view, automatic: automatic,
+      explicitWindow: Boolean(customWindow),
+      past: Boolean(customWindow && customWindow.until < now - 120),
+      longPreset: !customWindow && seconds > 86400,
+      eventsFetchedAt: sameView ? chartSession.eventsFetchedAt : 0,
+      controller: new AbortController(), requests: new Map()
+    };
+    if (chartSession) chartSession.controller.abort();
+    chartSession = session;
+    if (!sameView) eventsState = null;
 
     try {
-      const summaryRequest = getJson("/api/monitoring/summary", params);
-      // Give the visible plots priority over supplementary requests and draw
-      // each series as soon as its data and the summary settings are ready.
-      const chartRequests = chartsDue
-        ? plans.map((plan) => plan && getJson("/api/monitoring/series", plan.query).catch(() => null))
-        : null;
+      session.settings = getJson("/api/monitoring/summary", params).then((summary) => {
+        if (reloadPending) return false;
+        showUnavailable(false);
+        if (noteWindowSkew(summary)) customWindow = null;
+        if (summary.sensors && typeof summary.sensors === "object") sensors = summary.sensors;
+        if (summary.log_digests && typeof summary.log_digests === "object") logDigests = summary.log_digests;
+        applyMonitors(summary.monitors);
+        renderSummary(summary);
+        renderStorage(summary.storage);
+        return true;
+      }).catch((error) => {
+        session.error = error;
+        return false;
+      });
+
+      const initialCharts = loadNearCharts(session, true);
       const timelineRequest = monitorOn("availability")
         ? getJson("/api/monitoring/states", params).catch(() => null)
         : Promise.resolve(null);
@@ -2027,83 +2102,56 @@
       const channelsRequest = monitorOn("uplinks")
         ? loadChannels().catch(() => null)
         : Promise.resolve(null);
-      // What is wrong now, whatever period is shown.
       const attentionRequest = getJson("/api/monitoring/attention", {}).catch(() => null);
-      // With the charts: a period that does not change has the same events.
-      const eventsRequest = showEvents && chartsDue
+      const eventsDue = !automatic || !sameView || (!session.past &&
+        (!session.longPreset || now - session.eventsFetchedAt >= LONG_RANGE_REFRESH_SECONDS));
+      const eventsRequest = showEvents && eventsDue
         ? getJson("/api/monitoring/events", eventsParams()).catch(() => null)
         : null;
 
-      const summary = await summaryRequest;
-      showUnavailable(false);
-      if (noteWindowSkew(summary)) {
-        // Show what it did return rather than an empty frame, now that the
-        // note says which period it belongs to.
-        customWindow = null;
+      if (!await session.settings) {
+        if (session.error) throw session.error;
+        return;
       }
-      if (summary.sensors && typeof summary.sensors === "object") sensors = summary.sensors;
-      if (summary.log_digests && typeof summary.log_digests === "object") logDigests = summary.log_digests;
-      applyMonitors(summary.monitors);
-      renderSummary(summary);
-      renderStorage(summary.storage);
-
-      const drawn = [];
-      if (eventsRequest && view !== chartsView) eventsState = null;
-      const chartsRendered = chartRequests && Promise.all(chartRequests.map(async (request, index) => {
-        if (!request) return;
-        const answer = await request;
-        const chart = CHARTS[index];
-        const plan = plans[index];
-        if (!chartOn(chart.name)) return;
-        const last = lastCharts[chart.name];
-        let payload = answer;
-        if (plan.from !== null) {
-          // A failed refresh keeps what was drawn rather than blanking it.
-          payload = answer
-            ? core.mergeSeries(last.payload, answer, plan.from, Number(answer.until || now) - seconds)
-            : last.payload;
-        }
-        lastCharts[chart.name] = payload ? { payload: payload, seconds: seconds } : null;
-        redrawChart(chart.name);
-        if (payload) drawn.push(chart.name);
-        if (payload && index === 0) {
-          // Always in minutes: "min" is already in the catalog, and one unit
-          // keeps the reading comparable as the server changes resolution.
-          const step = Number(payload.resolution_seconds) || 60;
-          setText(
-            "mon-resolution",
-            `${uiText("Resolution")}: ${formatCount(step / 60)} ${uiText("min")}`
-          );
-        }
-      }));
-
       const backendsRendered = timelineRequest.then(async (timeline) => {
+        if (reloadPending) return;
         if (monitorOn("availability")) renderTimeline(timeline);
         // The selected list has the last word on the note beside the heading.
         if (backendsView === "traffic") await loadBackendTraffic();
         if (backendsView === "requests") await loadBackendRequests();
       });
       const eventsRendered = eventsRequest && eventsRequest.then((events) => {
+        if (reloadPending) return;
         eventsState = events;
-        if (showEvents) drawn.forEach(redrawChart);
+        session.eventsFetchedAt = now;
+        if (showEvents) {
+          CHARTS.forEach(({ name }) => {
+            if (lastCharts[name] && lastCharts[name].view === session.view) redrawChart(name);
+          });
+        }
         renderEventsCount();
       });
+      // Recheck visibility after the summary applies the monitor settings.
       await Promise.all([
-        chartsRendered, backendsRendered, channelsRequest, attentionRequest.then(renderAttention), eventsRendered
+        initialCharts, loadNearCharts(session, true), backendsRendered, channelsRequest,
+        attentionRequest.then((attention) => { if (!reloadPending) renderAttention(attention); }), eventsRendered
       ]);
-      if (chartsRendered) {
-        chartsView = view;
-        if (plans.every((plan) => !plan || plan.from === null)) chartsFetchedAt = now;
-      }
       if (!eventsRequest) renderEventsCount();
     } catch (error) {
+      if (reloadPending) return;
+      session.controller.abort();
+      chartSession = null;
       showUnavailable(Boolean(error.unavailable));
       CHARTS.forEach((chart) => {
         lastCharts[chart.name] = null;
-        redrawChart(chart.name);
+        if (chartNearViewport(chart.name)) redrawChart(chart.name);
       });
     } finally {
       inFlight = false;
+      if (reloadPending) {
+        reloadPending = false;
+        loadAll();
+      }
     }
   }
 
@@ -2164,28 +2212,41 @@
   let sharedReading = null;
   let readingFrame = null;
   let pendingReading = null;
+  const readingCursors = new WeakMap();
+  const readingTooltips = new WeakMap();
 
   function readingBox(svg) {
+    const saved = readingTooltips.get(svg);
+    if (saved) return saved.box;
     const card = svg.closest(".mon-chart");
     if (!card) return null;
-    let box = card.querySelector(".mon-reading");
-    if (!box) {
-      box = document.createElement("div");
-      box.className = "mon-reading";
-      box.setAttribute("data-i18n-skip", "");
-      box.setAttribute("translate", "no");
-      box.hidden = true;
-      card.appendChild(box);
-    }
+    const box = document.createElement("div");
+    box.className = "mon-reading";
+    box.setAttribute("data-i18n-skip", "");
+    box.setAttribute("translate", "no");
+    box.hidden = true;
+    const time = document.createElement("div");
+    time.className = "mon-reading-time";
+    const events = document.createElement("div");
+    events.className = "mon-reading-events";
+    events.hidden = true;
+    const more = document.createElement("small");
+    events.appendChild(more);
+    const note = document.createElement("small");
+    note.className = "mon-sub";
+    note.textContent = uiText("Auto-refresh paused while inspecting");
+    box.append(time, events, note);
+    card.appendChild(box);
+    readingTooltips.set(svg, { box: box, time: time, events: events, more: more, note: note, rows: [], eventRows: [] });
     return box;
   }
 
   function hideReading(svg) {
-    const cursor = svg.querySelector(".mon-cursor");
-    if (cursor) cursor.remove();
+    const cursor = readingCursors.get(svg);
+    if (cursor) cursor.group.setAttribute("display", "none");
     const card = svg.closest(".mon-chart");
-    const box = card && card.querySelector(".mon-reading");
-    if (box) box.hidden = true;
+    const tooltip = readingTooltips.get(svg);
+    if (tooltip) tooltip.box.hidden = true;
     const legend = card && card.querySelector(".mon-legend.mon-inspecting");
     if (legend) {
       legend.classList.remove("mon-inspecting");
@@ -2218,27 +2279,43 @@
       updateReadingLegend(svg, new Map(), "");
       return;
     }
-    const old = svg.querySelector(".mon-cursor");
-    if (old) old.remove();
-    const cursor = element("g", {class: "mon-cursor", "aria-hidden": "true", "data-time": ts});
-    cursor.appendChild(element("line", {
-      class: "mon-reading-rule", x1: selected.x, x2: selected.x,
-      y1: geometry.top, y2: geometry.top + geometry.plotHeight
-    }));
+    let cursor = readingCursors.get(svg);
+    if (!cursor) {
+      const group = element("g", {class: "mon-cursor", "aria-hidden": "true"});
+      const rule = element("line", {class: "mon-reading-rule"});
+      group.appendChild(rule);
+      cursor = { group: group, rule: rule, points: [] };
+      readingCursors.set(svg, cursor);
+    }
+    cursor.group.setAttribute("data-time", ts);
+    cursor.group.removeAttribute("display");
+    cursor.rule.setAttribute("x1", selected.x);
+    cursor.rule.setAttribute("x2", selected.x);
+    cursor.rule.setAttribute("y1", geometry.top);
+    cursor.rule.setAttribute("y2", geometry.top + geometry.plotHeight);
     const values = new Map();
-    geometry.datasets.forEach((dataset) => {
+    const x = core.xAtIndex(geometry, selected.index);
+    geometry.datasets.forEach((dataset, index) => {
       const value = dataset.values[selected.index];
       const present = value !== null && value !== undefined;
       values.set(dataset.spec.key, present ? legendValue(dataset.spec, value) : "—");
+      let mark = cursor.points[index];
+      if (mark) mark.setAttribute("visibility", present ? "visible" : "hidden");
       if (!present) return;
-      cursor.appendChild(element("circle", {
-        class: "mon-reading-point", r: 3,
-        cx: core.xAtIndex(geometry, selected.index),
-        cy: geometry.top + geometry.plotHeight * (1 - Math.max(0, value) / geometry.ceiling),
-        stroke: dataset.spec.color
-      }));
+      if (!mark) {
+        mark = element("circle", {class: "mon-reading-point", r: 3});
+        cursor.points[index] = mark;
+        cursor.group.appendChild(mark);
+      }
+      mark.setAttribute("cx", x);
+      mark.setAttribute("cy", geometry.top + geometry.plotHeight * (1 - Math.max(0, value) / geometry.ceiling));
+      mark.setAttribute("stroke", dataset.spec.color);
     });
-    svg.appendChild(cursor);
+    for (let index = geometry.datasets.length; index < cursor.points.length; index += 1) {
+      if (cursor.points[index]) cursor.points[index].setAttribute("visibility", "hidden");
+    }
+    // A data redraw clears the SVG. Its cursor can be attached again.
+    if (cursor.group.parentNode !== svg) svg.appendChild(cursor.group);
     const format = geometry.spanSeconds >= 86400 ? dateTimeFormat : timeFormat;
     const when = format.format(new Date(Number(geometry.points[selected.index]) * 1000));
     updateReadingLegend(svg, values, when);
@@ -2250,9 +2327,9 @@
     if (!legend) return;
     legend.classList.add("mon-inspecting");
     legend.querySelectorAll(".mon-line-toggle").forEach((item) => {
-      item.querySelector("b").textContent = values.get(item.dataset.series) || "—";
+      readingText(item.querySelector("b"), values.get(item.dataset.series) || "—");
       const stamp = item.querySelector("small");
-      stamp.textContent = when && stamp.dataset.summary ? ` · ${when}` : "";
+      readingText(stamp, when && stamp.dataset.summary ? ` · ${when}` : "");
       item.title = when || uiText("No data for this period");
     });
   }
@@ -2261,55 +2338,62 @@
     const geometry = svg.__geometry;
     const box = readingBox(svg);
     if (!box) return;
-    box.textContent = "";
-    const when = document.createElement("div");
-    when.className = "mon-reading-time";
+    const tooltip = readingTooltips.get(svg);
     const format = geometry.spanSeconds >= 86400 ? dateTimeFormat : timeFormat;
-    when.textContent = format.format(new Date(Number(geometry.points[index]) * 1000));
-    box.appendChild(when);
-    geometry.datasets.forEach((dataset) => {
-      const row = document.createElement("div");
-      const swatch = document.createElement("i");
-      swatch.style.background = dataset.spec.color;
-      row.appendChild(swatch);
-      const label = document.createElement("span");
-      label.textContent = `${dataset.spec.component ? dataset.spec.label : uiText(dataset.spec.label)}: `;
-      row.appendChild(label);
-      const value = document.createElement("b");
-      const reading = dataset.values[index];
-      value.textContent = reading === null || reading === undefined ? "—" : legendValue(dataset.spec, reading);
-      row.appendChild(value);
-      box.appendChild(row);
-    });
-    const near = core.eventsNear(geometry.marks, index, core.eventReach(geometry, 6));
-    if (near.length) {
-      const events = document.createElement("div");
-      events.className = "mon-reading-events";
-      near.slice(0, 4).forEach((event) => {
+    readingText(tooltip.time, format.format(new Date(Number(geometry.points[index]) * 1000)));
+    geometry.datasets.forEach((dataset, rowIndex) => {
+      let entry = tooltip.rows[rowIndex];
+      if (!entry) {
         const row = document.createElement("div");
-        if (event.kind === "alert" || event.kind === "recovered") row.className = `mon-event-${event.kind}`;
-        row.textContent = `${format.format(new Date(Number(event.ts) * 1000))} ${eventText(event)}`;
-        if (event.kind === "change" && event.summary) {
-          const detail = document.createElement("small");
-          detail.textContent = event.summary.length > 90 ? `${event.summary.slice(0, 89)}…` : event.summary;
-          row.appendChild(detail);
-        }
-        events.appendChild(row);
-      });
-      if (near.length > 4) {
-        const more = document.createElement("small");
-        more.textContent = `+${formatCount(near.length - 4)}`;
-        events.appendChild(more);
+        const swatch = document.createElement("i");
+        const label = document.createElement("span");
+        const value = document.createElement("b");
+        row.append(swatch, label, value);
+        box.insertBefore(row, tooltip.events);
+        entry = { row: row, swatch: swatch, label: label, value: value };
+        tooltip.rows.push(entry);
       }
-      box.appendChild(events);
-    }
-    if (autoRefresh) {
-      const note = document.createElement("small");
-      note.className = "mon-sub";
-      note.textContent = uiText("Auto-refresh paused while inspecting");
-      box.appendChild(note);
-    }
+      entry.row.hidden = false;
+      entry.swatch.style.background = dataset.spec.color;
+      readingText(entry.label, `${dataset.spec.component ? dataset.spec.label : uiText(dataset.spec.label)}: `);
+      const reading = dataset.values[index];
+      readingText(entry.value, reading === null || reading === undefined ? "—" : legendValue(dataset.spec, reading));
+    });
+    tooltip.rows.slice(geometry.datasets.length).forEach((entry) => { entry.row.hidden = true; });
+    const near = core.eventsNear(geometry.marks, index, core.eventReach(geometry, 6));
+    tooltip.events.hidden = !near.length;
+    const shown = near.slice(0, 4);
+    shown.forEach((event, rowIndex) => {
+      let entry = tooltip.eventRows[rowIndex];
+      if (!entry) {
+        const row = document.createElement("div");
+        const text = document.createTextNode("");
+        const detail = document.createElement("small");
+        row.append(text, detail);
+        tooltip.events.insertBefore(row, tooltip.more);
+        entry = { row: row, text: text, detail: detail };
+        tooltip.eventRows.push(entry);
+      }
+      entry.row.hidden = false;
+      entry.row.className = event.kind === "alert" || event.kind === "recovered" ? `mon-event-${event.kind}` : "";
+      entry.text.data = `${format.format(new Date(Number(event.ts) * 1000))} ${eventText(event)}`;
+      const summary = event.kind === "change" ? event.summary || "" : "";
+      entry.detail.hidden = !summary;
+      readingText(entry.detail, summary.length > 90 ? `${summary.slice(0, 89)}…` : summary);
+    });
+    tooltip.eventRows.slice(shown.length).forEach((entry) => { entry.row.hidden = true; });
+    tooltip.more.hidden = near.length <= 4;
+    if (near.length > 4) readingText(tooltip.more, `+${formatCount(near.length - 4)}`);
+    tooltip.note.hidden = !autoRefresh;
     box.hidden = false;
+  }
+
+  function readingText(node, value) {
+    if (node.firstChild) {
+      if (node.firstChild.data !== value) node.firstChild.data = value;
+    } else {
+      node.textContent = value;
+    }
   }
 
   function showReading(svg, event) {
@@ -2340,7 +2424,7 @@
     if (!previous || previous.ts !== ts) {
       CHARTS.forEach((chart) => {
         const plot = byId(`mon-plot-${chart.name}`);
-        if (plot && chartOn(chart.name)) drawReading(plot, ts);
+        if (plot && plot.__geometry && chartOn(chart.name)) drawReading(plot, ts);
       });
     }
     if (!previous || previous.svg !== svg || previous.ts !== ts) {
@@ -2642,6 +2726,7 @@
 
   document.addEventListener("DOMContentLoaded", async () => {
     bindControls();
+    watchCharts();
     await loadSites();
     await loadAll();
     scheduleRefresh();
