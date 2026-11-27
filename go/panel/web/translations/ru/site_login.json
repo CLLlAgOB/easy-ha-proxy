@@ -1,0 +1,37 @@
+{
+  "meta": {
+    "code": "ru",
+    "label": "Русский"
+  },
+  "messages": {
+    "Authelia cannot protect this site: its sign-in covers only the domains below, and some of the site's names are outside them. Keep Authelia off for this site, or serve it under one of these domains.": "Authelia не может защитить этот сайт: её вход действует только для доменов ниже, а часть имён сайта вне их. Оставьте Authelia выключенной для этого сайта или разместите его под одним из этих доменов.",
+    "Sign-in through Authelia": "Вход через Authelia",
+    "One factor: a password": "Один фактор: пароль",
+    "Two factors: a password and a second factor": "Два фактора: пароль и второй фактор",
+    "Only these groups": "Только эти группы",
+    "Separate group names with commas. Leave the field empty to let every Authelia user in.": "Имена групп через запятую. Оставьте поле пустым, чтобы пускать всех пользователей Authelia.",
+    "No access rule lets anyone into this site yet, so it refuses every visitor. Saving the site with Authelia on adds one.": "Пока ни одно правило доступа не пускает на этот сайт, поэтому он отказывает всем посетителям. Сохранение сайта с включённой Authelia добавит правило.",
+    "The sign-in level and the groups are this site's rule on the Authelia access rules page: a change made there shows here, and saving here changes it there. Saving a change restarts Authelia for a few seconds.": "Уровень входа и группы — это правило сайта на странице правил доступа Authelia: изменение там видно здесь, а сохранение здесь меняет его там. Сохранение изменения перезапускает Authelia на несколько секунд.",
+    "With two factors, a user who has not registered a second factor yet is sent an email to register one.": "При двух факторах пользователю, который ещё не зарегистрировал второй фактор, придёт письмо для его регистрации.",
+    "Authelia does not send mail from this gateway yet: it writes it to a file. Set up mail on the Authelia settings page before requiring two factors.": "Authelia пока не отправляет почту с этого шлюза, а пишет её в файл. Настройте почту на странице настроек Authelia, прежде чем требовать два фактора.",
+    "Open the Authelia access rules": "Открыть правила доступа Authelia",
+    "The Authelia access rules could not be read, so this site's sign-in is not shown here.": "Не удалось прочитать правила доступа Authelia, поэтому вход этого сайта здесь не показан.",
+    "This site's access rule uses options the site editor does not offer (users, paths, networks, or a bypass or deny policy), so it is managed on the Authelia access rules page.": "Правило доступа этого сайта использует параметры, которых нет в редакторе сайта (пользователи, пути, сети или политика bypass либо deny), поэтому оно настраивается на странице правил доступа Authelia.",
+    "This site's access rule also names other domains, or not all of the site's names, so it is managed on the Authelia access rules page.": "Правило доступа этого сайта называет и другие домены или не все имена сайта, поэтому оно настраивается на странице правил доступа Authelia.",
+    "More than one access rule covers this site, so its sign-in is managed on the Authelia access rules page.": "Этот сайт охватывает больше одного правила доступа, поэтому его вход настраивается на странице правил доступа Authelia.",
+    "Authelia cannot protect this domain, so the site refuses every visitor.": "Authelia не может защитить этот домен, поэтому сайт отказывает всем посетителям.",
+    "No Authelia access rule lets anyone in, so the site refuses every visitor.": "Ни одно правило доступа Authelia никого не пускает, поэтому сайт отказывает всем посетителям.",
+    "Authelia cannot apply this rule to some of its domains: they are outside the domains its sign-in covers.": "Authelia не может применить это правило к части его доменов: они вне доменов, для которых действует её вход.",
+    "An Authelia access rule now lets this site's users sign in; Authelia was restarted to load it.": "Теперь правило доступа Authelia пускает пользователей этого сайта; Authelia перезапущена, чтобы его загрузить.",
+    "The site's Authelia access rule was updated; Authelia was restarted to load it.": "Правило доступа Authelia для сайта обновлено; Authelia перезапущена, чтобы его загрузить.",
+    "The site's Authelia access rule was removed; Authelia was restarted to load the change.": "Правило доступа Authelia для сайта удалено; Authelia перезапущена, чтобы загрузить изменение.",
+    "The site's Authelia access rule is managed on the Authelia access rules page and was left as it is.": "Правило доступа Authelia для сайта настраивается на странице правил доступа Authelia и оставлено без изменений.",
+    "The site's Authelia access rule was saved, but Authelia could not be restarted to load it; restart it on the Authelia settings page.": "Правило доступа Authelia для сайта сохранено, но Authelia не удалось перезапустить, чтобы его загрузить; перезапустите её на странице настроек Authelia.",
+    "Authelia cannot protect this site: its sign-in covers only the domains in the Authelia settings, and at least one of the site's names is outside them. Turn Authelia off for this site, or serve it under a domain Authelia covers.": "Authelia не может защитить этот сайт: её вход действует только для доменов из настроек Authelia, а хотя бы одно имя сайта вне их. Выключите Authelia для этого сайта или разместите его под доменом, который Authelia охватывает.",
+    "The Authelia sign-in level must be one_factor or two_factor": "Уровень входа Authelia должен быть one_factor или two_factor",
+    "Authelia groups must be a list of names": "Группы Authelia должны быть списком имён",
+    "An Authelia group name cannot contain spaces, commas or colons and is at most 128 characters long": "Имя группы Authelia не может содержать пробелы, запятые и двоеточия и не длиннее 128 символов",
+    "At most 50 Authelia groups can be named for a site": "Для сайта можно указать не больше 50 групп Authelia",
+    "The site's Authelia access rule could not be changed: the Authelia rules helper is unavailable.": "Правило доступа Authelia для сайта изменить не удалось: служба правил Authelia недоступна."
+  }
+}

@@ -128,6 +128,11 @@
               Alt: {{ alt_list | join(", ") }}
             </div>
             {% endif %}
+            {% if item.login_issue == 'uncovered' %}
+            <div class="text-warning">Authelia cannot protect this domain, so the site refuses every visitor.</div>
+            {% elif item.login_issue == 'no_rule' %}
+            <div class="text-warning">No Authelia access rule lets anyone in, so the site refuses every visitor.</div>
+            {% endif %}
 
             {% if raw.name != primary_domain %}
             <div class="site-domain-id">

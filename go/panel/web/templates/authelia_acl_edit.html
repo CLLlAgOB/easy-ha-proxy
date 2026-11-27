@@ -111,6 +111,13 @@
 
       <div class="card-body">
 
+        {% if rule.uncovered %}
+        <div class="alert alert-warning">
+          <p>Authelia cannot apply this rule to some of its domains: they are outside the domains its sign-in covers.</p>
+          <p class="mono" translate="no">{{ rule.uncovered }}</p>
+        </div>
+        {% endif %}
+
         {% if rule.advanced %}
         <p class="text-muted">This rule uses advanced options and is preserved unchanged.
           Edit it in the Authelia configuration file. You can move or delete it here.</p>

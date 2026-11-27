@@ -704,8 +704,15 @@ func (c *Ctx) renderACL(status int, ui []*Map, activeDomain *string, loadError a
 	rules := make([]any, len(ui))
 	order := []string{}
 	byDomain := map[string][]any{}
+	cookieDomains, cookiesKnown := AutheliaCookieDomains()
 	for i, u := range ui {
 		u.Set("idx", int64(i))
+		u.Delete("uncovered")
+		if cookiesKnown {
+			if unc := UncoveredNames(splitRuleDomains(pyStr(orValue(u.Value("domains"), ""))), cookieDomains); len(unc) > 0 {
+				u.Set("uncovered", strings.Join(unc, ", "))
+			}
+		}
 		rules[i] = u
 		d := pyStr(orValue(u.Value("domains"), ""))
 		if _, seen := byDomain[d]; !seen {

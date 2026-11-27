@@ -207,8 +207,20 @@ func (a *App) registerSiteEdit() {
 				var ok bool
 				var msg string
 				var abortErr error
+				var beforeEff *Map
+				var loginReq *siteLoginRequest
+				if _, has := c.Form("authelia_policy"); has {
+					var lerr string
+					loginReq, lerr = parseSiteLoginRequest(newMap("policy", c.FormStrip("authelia_policy"), "groups", c.FormStr("authelia_groups")))
+					if lerr != "" {
+						errMsg = lerr
+					}
+				}
 				func() {
 					defer release()
+					if errMsg != nil {
+						return
+					}
 					defaults, raw, eff, err = SiteRawAndEffective(name)
 					if err != nil {
 						abortErr = err
@@ -228,8 +240,25 @@ func (a *App) registerSiteEdit() {
 						errMsg = e
 						return
 					}
+					beforeEff = eff
+					afterEff, err := EffectiveSiteSettings(newSite)
+					if err != nil {
+						abortErr = err
+						return
+					}
+					if refusal := loginRefusal(beforeEff, afterEff); refusal != "" {
+						errMsg = refusal
+						return
+					}
 					ok, msg = saveSiteRaw(op, name, newSite)
 				}()
+				if abortErr == nil && errMsg == nil && ok {
+					if _, _, savedEff, err := SiteRawAndEffective(name); err == nil && savedEff != nil {
+						if note := SyncSiteLoginAfterSave(op, beforeEff, savedEff, loginReq); note != "" {
+							msg += " " + note
+						}
+					}
+				}
 				if abortErr != nil {
 					return abortErr
 				}
@@ -263,6 +292,7 @@ func (a *App) registerSiteEdit() {
 			"original_name": name, "site_revision": EntryRevision(raw), "is_new": false,
 			"internal_ca": authorities.Value("internal"), "external_cas": orValue(authorities.Value("external"), []any{}),
 			"dns_profiles": availableDNSProfiles(), "geoip_country_codes": strList(ConfiguredGeoIPCountries()...),
+			"site_login": siteLoginForEditor(eff),
 		})
 	})
 	a.Handle("routes.haproxy_site_issue_cert", func(c *Ctx) error {

@@ -590,7 +590,8 @@
                     </select>
 
                     <label class="u-mt-2 form-label" for="authelia_enabled" >authelia_enabled</label>
-                    <select name="authelia_enabled" id="authelia_enabled" class="form-input">
+                    <select name="authelia_enabled" id="authelia_enabled" class="form-input"
+                        data-eff-default="{{ 'true' if site_defaults.authelia_enabled|default(false) else 'false' }}">
                         <option value="" {% if raw_authelia is none %}selected{% endif %}>
                             Default ({{ eff.authelia_enabled|default(site_defaults.authelia_enabled|default(false))
                             }})
@@ -599,6 +600,46 @@
                         <option value="false" {% if raw_authelia is sameas false %}selected{% endif %}>Disabled
                         </option>
                     </select>
+
+                    {% set login = site_login %}
+                    <div id="authelia-login-block" data-editable="{{ 'true' if login.editable else 'false' }}">
+                        {% if login.uncovered %}
+                        <div class="alert alert-warning u-mt-2">
+                            <p>Authelia cannot protect this site: its sign-in covers only the domains below, and some of the site's names are outside them. Keep Authelia off for this site, or serve it under one of these domains.</p>
+                            <p class="mono" translate="no">{{ login.cookie_domains | join(", ") }}</p>
+                        </div>
+                        {% endif %}
+                        <div id="authelia-login-fields">
+                        {% if login.editable %}
+                        <label class="u-mt-2 form-label" for="authelia_policy">Sign-in through Authelia</label>
+                        <select name="authelia_policy" id="authelia_policy" class="form-input">
+                            <option value="one_factor" {% if login.policy == 'one_factor' %}selected{% endif %}>One factor: a password</option>
+                            <option value="two_factor" {% if login.policy == 'two_factor' %}selected{% endif %}>Two factors: a password and a second factor</option>
+                        </select>
+                        <label class="u-mt-2 form-label" for="authelia_groups">Only these groups</label>
+                        <input type="text" name="authelia_groups" id="authelia_groups" class="form-input mono"
+                            list="authelia-group-list" value="{{ login.groups | join(', ') }}"
+                            placeholder="admins, users" spellcheck="false" translate="no">
+                        <datalist id="authelia-group-list">
+                            {% for g in login.known_groups %}<option value="{{ g }}"></option>{% endfor %}
+                        </datalist>
+                        <div class="table-meta">Separate group names with commas. Leave the field empty to let every Authelia user in.</div>
+                        {% if login.state == 'none' %}
+                        <div class="text-warning u-mt-2">No access rule lets anyone into this site yet, so it refuses every visitor. Saving the site with Authelia on adds one.</div>
+                        {% endif %}
+                        <div class="table-meta">The sign-in level and the groups are this site's rule on the Authelia access rules page: a change made there shows here, and saving here changes it there. Saving a change restarts Authelia for a few seconds.</div>
+                        <div class="table-meta">With two factors, a user who has not registered a second factor yet is sent an email to register one.</div>
+                        {% if not login.mail_relay %}
+                        <div class="text-warning">Authelia does not send mail from this gateway yet: it writes it to a file. Set up mail on the Authelia settings page before requiring two factors.</div>
+                        {% endif %}
+                        {% elif login.state == 'managed' %}
+                        <p class="table-meta u-mt-2">{{ login.reason }}</p>
+                        <p class="table-meta"><a href="{{ url_for('authelia_acl.edit_rules') }}">Open the Authelia access rules</a></p>
+                        {% elif login.state == 'unavailable' %}
+                        <p class="table-meta u-mt-2">The Authelia access rules could not be read, so this site's sign-in is not shown here.</p>
+                        {% endif %}
+                        </div>
+                    </div>
 
                     {% set allow_list = site.allow_ips or [] %}
                     <label class="u-mt-2 form-label" for="allow_ips" >Open only to these addresses</label>

@@ -136,6 +136,7 @@ func (a *App) registerSitesPage() {
 				shown = append(shown, s)
 			}
 		}
+		annotateSiteLoginIssues(shown)
 		return c.Render("haproxy_sites.html", map[string]any{"sites": shown, "site_defaults": defaults, "config_vars": cv, "error": errMsg, "message": message})
 	})
 	a.Handle("routes.mail_settings_page", staticPage("mail_settings.html", nil))

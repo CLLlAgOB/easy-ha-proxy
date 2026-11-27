@@ -807,8 +807,35 @@ delete site.geo_countries;
         original_name: form.getAttribute("data-original-name") || site.name,
         revision: revisionField ? revisionField.value : ""
       };
+
+      // The Authelia sign-in level and groups: not part of the site, they
+      // become its access rule on the server. Sent only where the editor owns
+      // that rule and Authelia is on for the site.
+      var loginBlock = document.getElementById("authelia-login-block");
+      var policyEl = document.getElementById("authelia_policy");
+      if (loginBlock && policyEl && loginBlock.getAttribute("data-editable") === "true" &&
+          effTcpPass !== true &&
+          effectiveSelectBool(document.getElementById("authelia_enabled"), "false")) {
+        var groupsEl = document.getElementById("authelia_groups");
+        payload.authelia_login = {
+          policy: policyEl.value,
+          groups: (groupsEl ? groupsEl.value : "").split(",")
+            .map(function (g) { return g.trim(); })
+            .filter(function (g) { return g !== ""; })
+        };
+      }
       return payload;
     }
+
+    // The sign-in fields only mean something while Authelia is on.
+    (function () {
+      var sel = document.getElementById("authelia_enabled");
+      var fields = document.getElementById("authelia-login-fields");
+      if (!sel || !fields) return;
+      function sync() { fields.hidden = !effectiveSelectBool(sel, "false"); }
+      sel.addEventListener("change", sync);
+      sync();
+    })();
 
     // ------------------------------------------------------------------
     // Form submit: validation + POST /haproxy/sites/save
@@ -897,7 +924,9 @@ delete site.geo_countries;
               setSaveStatus(msg, true);
               return;
             }
-            setSaveStatus(data.message || "Saved", false);
+            // detail: what happened to the site's Authelia access rule, a
+            // sentence of its own (translated apart from the save message).
+            setSaveStatus((data.message || "Saved") + (data.detail ? " " + data.detail : ""), false);
             // The page now shows what was written: a second save from it is
             // checked against that, under the name it was saved with.
             var revisionField = document.getElementById("site-revision");

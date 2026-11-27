@@ -47,8 +47,15 @@ func (a *App) registerSiteRoutes() {
 			orig = pyStr(origV)
 		}
 		expected := orValue(payload.Value("revision"), nil)
+		// The site's Authelia sign-in level and groups: they live in the access
+		// rule, not in websites.yml, and are applied to it after the save.
+		loginReq, loginErr := parseSiteLoginRequest(payload.Value("authelia_login"))
+		if loginErr != "" {
+			return c.JSON(400, newMap("ok", false, "error", loginErr))
+		}
 		name := orStr(orValue(site.Value("name"), origV))
 		before := pyyaml.NewMap()
+		var beforeEff *Map
 		revision := ""
 		op := c.op()
 		release, err := op.Lock("websites")
@@ -69,6 +76,7 @@ func (a *App) registerSiteRoutes() {
 				}
 				if previous != nil {
 					before = previous
+					beforeEff = eff
 				}
 				if eff != nil && eff.Value("access_gate") == true {
 					early = c.JSON(400, newMap("ok", false, "error", "Use the service-site editor"))
@@ -77,6 +85,15 @@ func (a *App) registerSiteRoutes() {
 			}
 			if site.Value("access_gate") == true {
 				early = c.JSON(400, newMap("ok", false, "error", "Use the service-site editor"))
+				return
+			}
+			afterEff, err := EffectiveSiteSettings(site)
+			if err != nil {
+				serr = err
+				return
+			}
+			if refusal := loginRefusal(beforeEff, afterEff); refusal != "" {
+				early = c.JSON(400, newMap("ok", false, "error", refusal, "authelia_uncovered", true))
 				return
 			}
 			okSave, msg, serr = SaveSiteFromJSON(op, site, orig, expected)
@@ -103,7 +120,17 @@ func (a *App) registerSiteRoutes() {
 			res, summary, detail = auditResultSuccess, AuditSummarize(before, site), ""
 		}
 		c.RecordRequest(act, AuditEntry{ObjectType: "site", ObjectID: name, Result: res, Summary: summary, Detail: detail})
+		loginNote := ""
 		if okSave {
+			// Outside the websites lock: the rule change talks to configd and
+			// restarts Authelia.
+			if _, _, savedEff, err := SiteRawAndEffective(name); err == nil && savedEff != nil {
+				loginNote = SyncSiteLoginAfterSave(op, beforeEff, savedEff, loginReq)
+				if loginNote != "" {
+					c.RecordRequest("site.authelia_rule", AuditEntry{ObjectType: "site", ObjectID: name,
+						Result: recordResult(loginNoteOK(loginNote)), Detail: truncRunes(loginNote, 500)})
+				}
+			}
 			now, has := site.Get("cert_renewal_paused")
 			if !has {
 				now = before.Value("cert_renewal_paused")
@@ -120,6 +147,11 @@ func (a *App) registerSiteRoutes() {
 			status = 200
 		}
 		answer := newMap("ok", okSave, okKey(okSave), msg)
+		if loginNote != "" {
+			// Its own field, translated on its own: a sentence glued to the
+			// save message would match no catalog entry.
+			answer.Set("detail", loginNote)
+		}
 		if revision != "" {
 			answer.Set("revision", revision)
 		}
