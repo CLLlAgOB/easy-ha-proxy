@@ -161,24 +161,45 @@
     const button = byId("schedule-run");
     button.disabled = true;
     status(t("Running. A full backup and its upload can take several minutes."));
-    const { ok, payload } = await api("/api/schedule/run", {});
-    button.disabled = false;
-    if (!ok) {
-      status(reason(payload, "It did not run"));
-      return;
+    try {
+      const { ok, payload } = await api("/api/schedule/run", {});
+      if (!ok) {
+        status(reason(payload, "It did not run"));
+        return;
+      }
+      if (payload.skipped) {
+        status(payload.skipped);
+        return;
+      }
+      let outcome = payload;
+      if (payload.status === "queued") {
+        const job = await waitForRun(payload.job_id);
+        if (job.status !== "completed") {
+          status(reason(job, "It did not run"));
+          return;
+        }
+        outcome = job.output || {};
+      }
+      const uploads = (outcome.uploads || []).length;
+      status(t("Done. The archive was copied to N destination(s).").replace("N", String(uploads)));
+    } catch (error) {
+      status(reason(error, "The backup service is not answering"));
+    } finally {
+      button.disabled = false;
+      refresh().catch(() => {});
     }
-    if (payload.skipped) {
-      status(payload.skipped);
-    } else {
-      const uploads = (payload.uploads || []).length;
-      status(
-        t("Done. The archive was copied to N destination(s).").replace(
-          "N",
-          String(uploads)
-        )
-      );
+  }
+
+  async function waitForRun(id) {
+    const path = `/api/status?job_id=${encodeURIComponent(id)}&compact=1`;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const { ok, payload } = await api(path);
+      if (!ok) throw payload;
+      const job = payload.job;
+      if (!job || job.id !== id) throw new Error(t("The backup service is not answering"));
+      if (job.status !== "queued" && job.status !== "running") return job;
     }
-    refresh();
   }
 
   document.addEventListener("DOMContentLoaded", () => {

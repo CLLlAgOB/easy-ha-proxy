@@ -74,6 +74,62 @@ func TestRunBackupScheduledExitCodes(t *testing.T) {
 	}
 }
 
+func TestRunBackupScheduledPollsQueuedJob(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		code   int
+		text   string
+	}{
+		{"completed", 0, "backup abc copied to 1 destination(s)"},
+		{"failed", 1, "storage unavailable"},
+		{"interrupted", 1, "daemon restarted"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			sock := filepath.Join(t.TempDir(), "backupd.sock")
+			ln, err := net.Listen("unix", sock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			gotRequests := make(chan []map[string]string, 1)
+			go func() {
+				var requests []map[string]string
+				defer func() { gotRequests <- requests }()
+				output := map[string]any{"backup_id": "abc", "uploads": []string{"nas"}}
+				if tc.status == "failed" {
+					output["errors"] = []string{"storage unavailable"}
+				}
+				for _, reply := range []map[string]any{
+					{"ok": true, "status": "queued", "job_id": "test-job"},
+					{"ok": true, "job": map[string]any{
+						"status": tc.status, "error": "daemon restarted", "output": output,
+					}},
+				} {
+					conn, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					var request map[string]string
+					_ = json.NewDecoder(conn).Decode(&request)
+					requests = append(requests, request)
+					_ = json.NewEncoder(conn).Encode(reply)
+					_ = conn.Close()
+				}
+			}()
+			var out, errBuf bytes.Buffer
+			code := RunBackupScheduled(context.Background(), sock, 5*time.Second, &out, &errBuf)
+			if code != tc.code || !strings.Contains(out.String()+errBuf.String(), tc.text) {
+				t.Fatalf("rc=%d out=%q err=%q", code, out.String(), errBuf.String())
+			}
+			requests := <-gotRequests
+			if len(requests) != 2 || requests[0]["action"] != "run_scheduled" ||
+				requests[1]["action"] != "job_status" || requests[1]["job_id"] != "test-job" {
+				t.Fatalf("requests: %v", requests)
+			}
+		})
+	}
+}
+
 func TestUnitFailedJournalFilteringAndAlertDelivery(t *testing.T) {
 	journal := strings.Join([]string{
 		`{"SYSLOG_IDENTIFIER":"systemd","MESSAGE":"Failed with result exit-code"}`,

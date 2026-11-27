@@ -11,7 +11,7 @@ OnFailure=easy-ha-proxy-unit-failed@%n.service
 Type=oneshot
 User=root
 # The daemon owns the maintenance lock, so the timer only asks it to run and
-# waits for the answer. Doing the work here would race a restore or an update.
+# polls for the job result. Doing the work here would race a restore or an update.
 ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} backup-run
 TimeoutStartSec={{ backup_schedule_timeout | default('8h') }}
 Nice=10

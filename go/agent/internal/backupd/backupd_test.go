@@ -128,6 +128,72 @@ func TestRequestValidation(t *testing.T) {
 	}
 }
 
+func TestScheduledBackupReturnsBeforeArchiveAndTracksDelivery(t *testing.T) {
+	d := newTestDaemon(t)
+	if err := d.setSchedulePassphrase([]byte("a stored passphrase")); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.atomicJSON(d.Opts.SchedulePath, map[string]any{
+		"enabled": true, "destinations": []string{"missing"}, "quiesce": false,
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	gate := make(chan struct{})
+	release := true
+	t.Cleanup(func() {
+		if release {
+			close(gate)
+		}
+	})
+	wait := d.sleep
+	d.sleep = func(duration time.Duration) {
+		if duration == 2*time.Second {
+			<-gate
+		}
+		wait(duration)
+	}
+	request := map[string]any{"action": "run_scheduled"}
+	answers := make(chan map[string]any, 1)
+	errs := make(chan error, 1)
+	go func() {
+		answer, err := d.Dispatch(context.Background(), request)
+		answers <- answer
+		errs <- err
+	}()
+	var started map[string]any
+	select {
+	case started = <-answers:
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run_scheduled blocked while the backup worker was held")
+	}
+	jobID, _ := started["job_id"].(string)
+	if jobID == "" || started["status"] != "queued" {
+		t.Fatalf("start response: %v", started)
+	}
+	if _, err := call(t, d, request); err == nil || err.Error() != "a scheduled backup is already running" {
+		t.Fatalf("duplicate schedule run: %v", err)
+	}
+	statusRequest := map[string]any{"action": "job_status", "job_id": jobID}
+	job := mustCall(t, d, statusRequest)["job"].(map[string]any)
+	if job["operation"] != "scheduled_backup" || !activeStatus(job["status"]) {
+		t.Fatalf("job while held: %v", job)
+	}
+	close(gate)
+	release = false
+	job = waitJob(t, d, jobID)
+	output, _ := job["output"].(map[string]any)
+	if job["status"] != "failed" || !strings.HasPrefix(pyStr(job["error"]), "missing:") || !truthy(output["backup_id"]) {
+		t.Fatalf("delivery outcome: %v", job)
+	}
+	if got := d.loadSchedule()["last_result"]; got != job["error"] {
+		t.Errorf("last schedule result = %q, want %q", got, job["error"])
+	}
+}
+
 func TestBackupInspectRestoreRoundTrip(t *testing.T) {
 	d := newTestDaemon(t)
 	pass := "correct horse battery staple"

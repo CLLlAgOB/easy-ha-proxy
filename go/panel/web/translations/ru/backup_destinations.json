@@ -64,6 +64,8 @@
     "Add a destination first, then choose it here.": "Сначала добавьте назначение, затем выберите его здесь.",
     "no — the schedule cannot run without one": "нет — без неё расписание не запустится",
     "Running. A full backup and its upload can take several minutes.": "Выполняется. Полный бэкап и его отправка могут занять несколько минут.",
+    "Running scheduled backup": "Выполняется резервное копирование по расписанию",
+    "scheduled_backup": "Резервное копирование по расписанию",
     "Done. The archive was copied to N destination(s).": "Готово. Архив скопирован в N назначений.",
     "It did not run": "Не запустилось",
     "enabled must be boolean": "enabled должен быть логическим значением",

@@ -304,13 +304,20 @@ func (d *Daemon) recordScheduleOutcome(result string) {
 	_ = d.atomicJSON(d.Opts.SchedulePath, record, 0o600)
 }
 
-// runScheduledBackup makes a backup and sends it away, inline: the timer
-// wants an exit code.
+// runScheduledBackup queues the whole run, including delivery and retention.
 func (d *Daemon) runScheduledBackup(req map[string]any) (map[string]any, error) {
 	if !d.scheduledMu.TryLock() {
 		return nil, bErr("busy", "a scheduled backup is already running")
 	}
-	defer d.scheduledMu.Unlock()
+	queued := false
+	defer func() {
+		if !queued {
+			d.scheduledMu.Unlock()
+		}
+	}()
+	if d.shuttingDown() {
+		return nil, bErr("conflict", "backup daemon is shutting down")
+	}
 	d.scheduleMu.Lock()
 	schedule := d.loadSchedule()
 	var raw []byte
@@ -334,19 +341,57 @@ func (d *Daemon) runScheduledBackup(req map[string]any) (map[string]any, error) 
 	if passphraseErr != nil {
 		return nil, passphraseErr
 	}
+	passphrase, err := requirePassphrase(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return nil, err
+	}
+	job, err := d.newJob("scheduled_backup", nil)
+	if err != nil {
+		return nil, err
+	}
+	jobID := job["id"].(string)
+	queued = true
+	go d.scheduledBackupWorker(jobID, passphrase, schedule)
+	return map[string]any{"ok": true, "job_id": jobID, "status": "queued"}, nil
+}
+
+func (d *Daemon) scheduledBackupWorker(jobID, passphrase string, schedule map[string]any) {
+	defer d.scheduledMu.Unlock()
+	outcome, err := d.completeScheduledBackup(jobID, passphrase, schedule)
+	if err != nil {
+		message := truncRunes(err.Error(), 4096)
+		d.recordScheduleOutcome(message)
+		d.finishFailed(jobID, errors.New(message), 1, "", "")
+		return
+	}
+	status := "completed"
+	var message any
+	if failures := outcome["errors"].([]string); len(failures) > 0 {
+		status = "failed"
+		message = truncRunes(strings.Join(failures, "; "), 4096)
+	}
+	if _, err := d.updateJob(jobID, map[string]any{
+		"status": status, "completed_at": utcNow(), "output": outcome, "error": message,
+	}); err != nil {
+		d.finishFailed(jobID, err, 1, "", "")
+	}
+}
+
+func (d *Daemon) completeScheduledBackup(jobID, passphrase string, schedule map[string]any) (map[string]any, error) {
+	if _, err := d.updateJob(jobID, map[string]any{"status": "running", "started_at": utcNow()}); err != nil {
+		return nil, err
+	}
 	started, err := d.startBackup(map[string]any{
-		"action": "start_backup", "passphrase": strings.TrimSpace(string(raw)),
-		"include_ssh": schedule["include_ssh"], "quiesce": schedule["quiesce"],
+		"passphrase": passphrase, "include_ssh": schedule["include_ssh"], "quiesce": schedule["quiesce"],
 	})
 	if err != nil {
 		return nil, err
 	}
-	jobID := started["job_id"].(string)
+	backupJobID := started["job_id"].(string)
 	deadline := time.Now().Add(time.Duration(d.Opts.ScheduledTimeoutSeconds) * time.Second)
 	state := map[string]any{}
-	for time.Now().Before(deadline) {
-		d.sleep(5 * time.Second)
-		if job, err := d.loadJob(jobID, false); err == nil {
+	for {
+		if job, err := d.loadJob(backupJobID, false); err == nil {
 			state = job
 		} else {
 			var be *Error
@@ -357,11 +402,17 @@ func (d *Daemon) runScheduledBackup(req map[string]any) (map[string]any, error) 
 		if terminalStatus(state["status"]) {
 			break
 		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		d.sleep(min(5*time.Second, remaining))
 	}
 	if state["status"] != "completed" {
-		d.recordScheduleOutcome(fmt.Sprintf("the backup did not complete: %s", pyNone(state["status"])))
-		d.reportAlert("backup.failed", jobID, "The scheduled backup did not complete", truncRunes(pyStr(state["error"]), 500))
-		return map[string]any{"ok": false, "job_id": jobID, "error": "the backup did not complete"}, nil
+		if message, _ := state["error"].(string); message != "" {
+			return nil, bErr("invalid", "the backup did not complete: %s", message)
+		}
+		return nil, bErr("invalid", "the backup did not complete: %s", pyNone(state["status"]))
 	}
 	backupID := ""
 	if out, ok := state["output"].(map[string]any); ok {
@@ -369,7 +420,7 @@ func (d *Daemon) runScheduledBackup(req map[string]any) (map[string]any, error) 
 	}
 	uploads := []map[string]any{}
 	failures := []string{}
-	for _, name := range destinations {
+	for _, name := range schedule["destinations"].([]string) {
 		outcome, err := d.uploadBackup(map[string]any{"action": "upload", "backup_id": backupID, "destination": name})
 		if err != nil {
 			var be *Error
@@ -409,7 +460,7 @@ func (d *Daemon) runScheduledBackup(req map[string]any) (map[string]any, error) 
 				storage["free_bytes"], storage["low_space_bytes"], storage["count"], storage["bytes"]))
 	}
 	return map[string]any{
-		"ok": len(failures) == 0, "job_id": jobID, "backup_id": backupID, "uploads": uploads,
+		"backup_id": backupID, "uploads": uploads,
 		"errors": failures, "pruned": pruned, "local": storage,
 	}, nil
 }
@@ -452,7 +503,7 @@ func (d *Daemon) Dispatch(_ context.Context, req map[string]any) (resp map[strin
 		return nil, bErr("invalid", "unexpected request fields: %s", strings.Join(unexpected, ", "))
 	}
 	switch action {
-	case "run_scheduled", "upload", "destination_test", "stage_backup":
+	case "upload", "destination_test", "stage_backup":
 		select {
 		case d.longRequests <- struct{}{}:
 			defer func() { <-d.longRequests }()
@@ -463,6 +514,16 @@ func (d *Daemon) Dispatch(_ context.Context, req map[string]any) (resp map[strin
 	switch action {
 	case "status":
 		return d.statusResponse(req)
+	case "job_status":
+		id, err := identifier(req["job_id"], "job id")
+		if err != nil {
+			return nil, err
+		}
+		job, err := d.loadJob(id, false)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "job": job}, nil
 	case "stage_backup":
 		return d.stageBackup(req)
 	case "start_backup":

@@ -27,6 +27,7 @@
   const LOG_OPEN_KEY = "easy_ha_proxy_backup_log_open";
   const operationLabels = {
     backup: "Creating encrypted backup",
+    scheduled_backup: "Running scheduled backup",
     inspect: "Verifying backup archive",
     restore: "Restoring and reconciling server"
   };

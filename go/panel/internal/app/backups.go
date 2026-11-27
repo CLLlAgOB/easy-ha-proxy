@@ -326,6 +326,9 @@ func (a *App) registerBackups() {
 				return err
 			}
 			payload.Set("job_id", id)
+			if compact, _ := c.queryOpt("compact"); compact == "1" {
+				payload.Set("action", "job_status")
+			}
 		}
 		return c.backupCall(payload, false, 10*time.Second)
 	})
@@ -593,6 +596,6 @@ func (a *App) registerBackups() {
 		return c.backupCall(command, false, 10*time.Second)
 	})
 	a.Handle("system_backups.run_schedule_view", func(c *Ctx) error {
-		return c.backupCall(newMap("action", "run_scheduled", "on_demand", true), false, 1800*time.Second)
+		return c.backupCall(newMap("action", "run_scheduled", "on_demand", true), true, 10*time.Second)
 	})
 }

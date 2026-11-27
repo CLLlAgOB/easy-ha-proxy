@@ -90,6 +90,7 @@ var RequestFields = map[string]map[string]struct{}{
 	"schedule_save": setOf("action", "enabled", "destinations", "include_ssh", "quiesce",
 		"passphrase", "time", "keep_local"),
 	"run_scheduled": setOf("action", "on_demand"),
+	"job_status":    setOf("action", "job_id"),
 }
 
 // Options holds every path and limit the Python daemon reads from BACKUPD_*.
