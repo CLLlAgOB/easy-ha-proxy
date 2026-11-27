@@ -6,12 +6,12 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"easy-ha-proxy/panel/shared/jinja"
 	"easy-ha-proxy/panel/shared/pyyaml"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/engine"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/tools"
 )
 
 // The GeoIP stage: roles/geoip_acl/tasks/geoip.yml (the role's main.yml
@@ -23,48 +23,6 @@ func init() {
 }
 
 var countryCode = regexp.MustCompile(`^[A-Z]{2}$`)
-
-// niceJSON is Ansible's to_nice_json for the values a selection holds:
-// json.dumps(indent=4, sort_keys=True, separators=(',', ': ')), ensure_ascii.
-func niceJSON(v any, depth int) string {
-	pad := strings.Repeat("    ", depth+1)
-	end := strings.Repeat("    ", depth)
-	switch x := v.(type) {
-	case map[string]any:
-		if len(x) == 0 {
-			return "{}"
-		}
-		keys := make([]string, 0, len(x))
-		for k := range x {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		parts := make([]string, 0, len(keys))
-		for _, k := range keys {
-			parts = append(parts, pad+strconv.QuoteToASCII(k)+": "+niceJSON(x[k], depth+1))
-		}
-		return "{\n" + strings.Join(parts, ",\n") + "\n" + end + "}"
-	case []string:
-		if len(x) == 0 {
-			return "[]"
-		}
-		parts := make([]string, len(x))
-		for i, s := range x {
-			parts[i] = pad + strconv.QuoteToASCII(s)
-		}
-		return "[\n" + strings.Join(parts, ",\n") + "\n" + end + "]"
-	case bool:
-		if x {
-			return "true"
-		}
-		return "false"
-	case int:
-		return strconv.Itoa(x)
-	case string:
-		return strconv.QuoteToASCII(x)
-	}
-	return fmt.Sprint(v)
-}
 
 func geoip(b *Builder) []engine.Step {
 	dbOn := b.Bool("{{ geoip_database_enabled | default(true) | bool }}")
@@ -154,8 +112,10 @@ func geoip(b *Builder) []engine.Step {
 				if list == nil {
 					list = []string{}
 				}
-				content := niceJSON(map[string]any{"version": 1, "countries": list, "access_filter_enabled": selectionOn}, 0)
-				return &engine.File{Path: "/etc/haproxy/geoip/selection.json", Content: []byte(content),
+				// The form controld and the updater write: Ansible's to_nice_json
+				// (indent 4, no final newline) made every update after a panel apply
+				// rewrite the file and rebuild the GeoIP release for nothing.
+				return &engine.File{Path: "/etc/haproxy/geoip/selection.json", Content: tools.SelectionJSON(list, selectionOn),
 					Owner: "root", Group: "haproxy", Mode: 0o644}, nil
 			}},
 		{Name: "Install the GeoIP update command", Register: "geoip_update_command",

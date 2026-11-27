@@ -455,8 +455,12 @@ func restoreManaged(path string, content []byte, mode os.FileMode) error {
 	return nil
 }
 
-// selectionJSON is json.dumps(selection, indent=2, sort_keys=True) + "\n".
-func selectionJSON(countries []string, enabled bool) []byte {
+// SelectionJSON is json.dumps(selection, indent=2, sort_keys=True) + "\n": the
+// one form of /etc/haproxy/geoip/selection.json. This updater, controld's
+// config transactions and the installer's GeoIP stage all write it, so none of
+// them takes the file another one wrote for a change (countries sorted,
+// upper-case, by the caller).
+func SelectionJSON(countries []string, enabled bool) []byte {
 	var b strings.Builder
 	b.WriteString("{\n  \"access_filter_enabled\": ")
 	b.WriteString(strconv.FormatBool(enabled))
@@ -555,7 +559,7 @@ func (a *GeoIPArgs) configureSelection() error {
 		return err
 	}
 	if len(oldSelection) == 0 {
-		oldSelection = selectionJSON(previous, enabled)
+		oldSelection = SelectionJSON(previous, enabled)
 	}
 	if enabled && len(countries) == 0 {
 		return gerr("at least one country is required while global GeoIP filtering is enabled")
@@ -569,7 +573,7 @@ func (a *GeoIPArgs) configureSelection() error {
 	if err != nil {
 		return err
 	}
-	newSelection := selectionJSON(countries, enabled)
+	newSelection := SelectionJSON(countries, enabled)
 	unlock, err := geoipLock(resolveDir(a.Directory))
 	if err != nil {
 		return err

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"easy-ha-proxy/panel/shared/jinja"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/tools"
 )
 
 const goodConfig = `global
@@ -173,6 +174,21 @@ func TestCanonicalGeoIPSelection(t *testing.T) {
 	empty := map[string]any{"version": 1, "countries": []any{}, "access_filter_enabled": false}
 	if got := string(canonicalConfigGeoIPSelection(empty)); got != "{\n  \"access_filter_enabled\": false,\n  \"countries\": [],\n  \"version\": 1\n}\n" {
 		t.Fatalf("empty selection:\n%s", got)
+	}
+}
+
+// The updater and the installer's GeoIP stage write selection.json through
+// tools.SelectionJSON; a transaction must produce the same bytes, or the next
+// update sees a change and rebuilds the GeoIP release.
+func TestCanonicalGeoIPSelectionMatchesTheUpdater(t *testing.T) {
+	for _, tc := range []struct {
+		countries []string
+		enabled   bool
+	}{{[]string{}, false}, {[]string{"FR"}, false}, {[]string{"DE", "RU", "US"}, true}} {
+		sel := map[string]any{"version": 1, "countries": stringsToAny(tc.countries), "access_filter_enabled": tc.enabled}
+		if got, want := string(canonicalConfigGeoIPSelection(sel)), string(tools.SelectionJSON(tc.countries, tc.enabled)); got != want {
+			t.Errorf("%v %v:\ncontrold %q\nupdater  %q", tc.countries, tc.enabled, got, want)
+		}
 	}
 }
 

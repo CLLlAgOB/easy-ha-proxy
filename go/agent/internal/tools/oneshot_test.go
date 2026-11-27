@@ -200,7 +200,7 @@ func TestGeoIPReaderCollapseAndSelection(t *testing.T) {
 	if c, err := normalizeCountries([]string{"de, us", "DE"}); err != nil || strings.Join(c, ",") != "DE,US" {
 		t.Fatalf("%v %v", c, err)
 	}
-	if string(selectionJSON([]string{"DE"}, true)) != "{\n  \"access_filter_enabled\": true,\n  \"countries\": [\n    \"DE\"\n  ],\n  \"version\": 1\n}\n" {
+	if string(SelectionJSON([]string{"DE"}, true)) != "{\n  \"access_filter_enabled\": true,\n  \"countries\": [\n    \"DE\"\n  ],\n  \"version\": 1\n}\n" {
 		t.Fatal("selection json")
 	}
 	if strings.Join(monthCandidates(time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC), 3), ",") != "2026-01,2025-12,2025-11" {
