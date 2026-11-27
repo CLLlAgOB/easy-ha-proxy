@@ -639,7 +639,10 @@ func validateSite(siteV any, index int) error {
 				err = valueErr("%s.add_headers: invalid header name %s", p, pyRepr(name))
 				return
 			}
-			if pyLen(val) > 2048 || strings.ContainsAny(val, "\"\\#") {
+			if pyLen(val) > 2048 || strings.ContainsAny(val, "\"\\#%") {
+				// HAProxy evaluates log-format %[...] inside a set-header
+				// value, so a '%' could read %[env(HAPROXY_ADMIN_PROXY_SECRET)]
+				// or another sample fetch into the response header.
 				err = valueErr("%s.add_headers[%s]: header value contains unsafe characters", p, pyRepr(name))
 			}
 		})
@@ -850,8 +853,9 @@ func noSharedHAProxyNames(entries []any, label string) error {
 }
 
 var protectedVarsKeys = []string{"admin_authelia_enabled", "admin_domain", "admin_ips_file", "admin_password",
-	"aut_domain", "authelia_enabled", "backend_ssl_verify_ca_file", "haproxy_certs_dir", "haproxy_server_state_file",
-	"haproxy_socket", "haproxy_socket_group", "root_domain", "whitelist_geo_file", "whitelist_global_file"}
+	"aut_domain", "authelia_enabled", "backend_ssl_verify_ca_file", "haproxy_certs_dir", "haproxy_mtls_dir",
+	"haproxy_server_state_file", "haproxy_socket", "haproxy_socket_group", "metrics_export_enabled",
+	"metrics_scrape_sources", "root_domain", "whitelist_geo_file", "whitelist_global_file"}
 
 // ValidateProtectedVarsUnchanged is validate_protected_vars_unchanged.
 func ValidateProtectedVarsUnchanged(existing, candidate *Map) error {
