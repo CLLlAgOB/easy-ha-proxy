@@ -115,7 +115,29 @@ if [[ "${skip_bootstrap_dependencies}" != "true" ]]; then
   export DEBIAN_FRONTEND=noninteractive
   log "Installing bootstrap dependencies"
   apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl git openssl
+  # On a fresh image this upgrades git and libraries. needrestart would then
+  # restart the services using them, systemd-resolved among them, and the
+  # clone below would fail with "Could not resolve host" while the resolver
+  # starts again. Services left on the old libraries are restarted from the
+  # OS security page or by the next reboot.
+  NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l \
+    apt-get install -y --no-install-recommends ca-certificates curl git openssl
+fi
+
+# Any resolver restart (needrestart above, cloud-init, a DHCP renewal) leaves
+# a few seconds without DNS: wait for the repository host before the first
+# network call instead of failing the whole installation on it.
+repository_host="$(sed -nE 's#^https?://([^/@]*@)?([^/:]+).*#\2#p' <<<"${repository}")"
+if [[ "${use_existing_source}" != "true" && -n "${repository_host}" ]]; then
+  for attempt in $(seq 1 30); do
+    if getent hosts "${repository_host}" >/dev/null 2>&1; then
+      break
+    fi
+    if [[ "${attempt}" -eq 1 ]]; then
+      log "Waiting for ${repository_host} to resolve"
+    fi
+    sleep 1
+  done
 fi
 
 install -d -m 0755 "${install_root}"
