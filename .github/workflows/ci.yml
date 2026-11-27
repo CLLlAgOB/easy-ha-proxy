@@ -240,8 +240,14 @@ jobs:
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          # The cross-toolchain comes from the runner's Ubuntu archive.
+          apt_options=(
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources
+            -o Dir::Etc::sourceparts=-
+            -o Acquire::Retries=3
+          )
+          sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update -qq
+          sudo apt-get "${apt_options[@]}" install -y -qq --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           cargo build --locked --release --target aarch64-unknown-linux-gnu
           file target/aarch64-unknown-linux-gnu/release/guardd-core
 
