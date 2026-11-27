@@ -83,30 +83,34 @@ totp:
   period: {{ authelia_totp_period }}
   skew: {{ authelia_totp_skew }}
 
-access_control:
-  default_policy: "{{ authelia_default_policy }}"
-  rules:
-    {{ authelia_access_control_rules | to_nice_yaml(indent=2) | indent(4) }}
 {# Access-gate sites need a login rule or Authelia's default_policy=deny would
    reject them. Generate one_factor rules here so they survive every full apply
    (the web UI also adds them at save time for immediate effect). Domains
-   already covered by a managed rule above are skipped. #}
+   already covered by a managed rule are skipped.
+   The generated rules join the managed ones in one list. An update first copies
+   the live rules into authelia.yml, generated ones included, and this file must
+   render the same before and after that copy: rendered apart, they came out
+   with a blank line the copy then dropped, so the first update after an
+   installation rewrote the file and restarted Authelia. #}
 {% set _managed_domains = [] %}
 {% for _rule in authelia_access_control_rules | default([]) %}
 {%   set _rd = _rule.domain | default([]) %}
 {%   if _rd is string %}{% set _ = _managed_domains.append(_rd) %}
 {%   else %}{% for _d in _rd %}{% set _ = _managed_domains.append(_d) %}{% endfor %}{% endif %}
 {% endfor %}
-{% set _gate_domains = [] %}
+{% set _gate_rules = [] %}
 {% for _site in sites | default([]) %}
 {%   if _site.access_gate | default(false) %}
 {%     for _hn in [_site.domain] + (_site.alt_names | default([])) %}
-{%       if _hn and _hn not in _managed_domains and _hn not in _gate_domains %}
-{%         set _ = _gate_domains.append(_hn) %}
-    - domain: {{ _hn }}
-      policy: one_factor
+{%       if _hn and _hn not in _managed_domains %}
+{%         set _ = _managed_domains.append(_hn) %}
+{%         set _ = _gate_rules.append({'domain': _hn, 'policy': 'one_factor'}) %}
 {%       endif %}
 {%     endfor %}
 {%   endif %}
 {% endfor %}
+access_control:
+  default_policy: "{{ authelia_default_policy }}"
+  rules:
+    {{ (authelia_access_control_rules + _gate_rules) | to_nice_yaml(indent=2) | indent(4) }}
 
