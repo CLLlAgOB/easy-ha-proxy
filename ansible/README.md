@@ -1,63 +1,31 @@
-# Deploying easy-ha-proxy by hand
+# The playbook and the roles
 
-The main playbook `easy-ha-proxy.yml` installs and configures HAProxy, Certbot, the GeoIP ACL, Authelia, the Docker build of `haproxy-admin` and the helper systemd daemons.
+`easy-ha-proxy.yml` and the roles under `roles/` describe the gateway:
+HAProxy, Certbot, the GeoIP ACL, Authelia, the `haproxy-admin` container and
+the helper systemd daemons. The installer agent (`easy-ha-proxy-agent apply
+playbook`) reads them on the server -- the playbook's entries and tags, the
+roles' defaults, templates and files -- and changes only what differs from
+the host. Ansible is not involved. [Русская версия](README.ru.md).
 
-For a single server the `easy-ha-proxy` command is the recommended way: it installs a local Ansible in a venv and runs this same playbook. This document describes the manual remote mode. [Русская версия](README.ru.md).
+The `easy-ha-proxy` command is the way to install and update. The managed
+configuration lives in `/etc/easy-ha-proxy` (`vars.yml`, `authelia.yml`,
+`authelia_users_initial.yml`, `websites.yml`, `tcp.yml`, `secrets.yml`,
+`inventory.ini`) and never in Git.
 
-## Requirements
+## Running entries
 
-- a control machine with Ansible;
-- a Debian/Ubuntu target host with SSH and `sudo`;
-- the `ansible.posix` and `community.docker` collections;
-- Docker Compose v2 on the target host for the container services;
-- the Ansible Vault password for the `group_vars/all/*.yml` files.
-
-Installing the collections:
-
-```bash
-cd ansible
-ansible-galaxy collection install -r requirements.yml
-```
-
-## Local configuration
-
-By default `easy-ha-proxy.yml` expects the group `easy_ha_proxy` in a manual `inventory.ini` and loads:
-
-- `vars.yml` -- domains, HAProxy, Certbot, SMTP and general settings;
-- `authelia.yml` -- Authelia's non-secret settings;
-- `authelia_users_initial.yml` -- the initial users;
-- `websites.yml` -- the HTTP/HTTPS sites;
-- `tcp.yml` -- the TCP proxies.
-
-`inventory.ini`, `vars.yml`, `websites.yml`, `tcp.yml`,
-`authelia_users_initial.yml` and the whole of `group_vars/` are local files
-and are kept out of Git. Not even Vault-encrypted files are published: a Vault
-password can leak or be guessed separately.
-
-A minimal inventory:
-
-```ini
-[easy_ha_proxy]
-proxy01 ansible_host=203.0.113.10 ansible_user=ansible
-```
-
-Before the first run, replace the initial users and the Argon2 hashes in `authelia_users_initial.yml`. Do not keep comments with the original passwords next to them.
-
-## Checking and running
-
-From the `ansible/` directory:
+A targeted run takes the playbook's tags; `--check` shows what would change
+and changes nothing:
 
 ```bash
-ansible-playbook --syntax-check -i inventory.ini easy-ha-proxy.yml
-ansible-playbook -i inventory.ini easy-ha-proxy.yml --list-tags
-ansible-playbook -i inventory.ini easy-ha-proxy.yml
+sudo easy-ha-proxy-agent apply playbook --check --tags status \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
+sudo easy-ha-proxy-agent apply playbook --tags ha-install,ha-cfg \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
 ```
 
-A full run updates packages, issues certificates and changes the system
-configuration. With `ansible_connection=local` a reboot is always left to the
-helper or the administrator to decide. An automatic reboot of a host managed
-over SSH is switched on only explicitly: `-e easy_ha_proxy_reboot_after_upgrade=true`.
-For targeted operations use the tags:
+An untagged run includes OS package upgrades and never reboots: the
+assistant asks after an upgrade and defaults to deferring the reboot.
 
 | Purpose | Tag |
 | --- | --- |
@@ -82,24 +50,13 @@ For targeted operations use the tags:
 | State check | `status` |
 | Adding a site | `addsite` |
 
-Examples:
-
-```bash
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t ha-install,ha-cfg
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t aut-install
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t ha-adm-install,ha-adm-cfg,ha-adm-start
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t addsite
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t ha-adm-daemons,aut-daemons,status
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t status
-```
-
 The targeted daemon stage copies every managed daemon script idempotently:
 services whose files did not change are not restarted. The full status check
 also covers the iptables loader, the systemd timers, journald, Certbot,
 cron/logrotate, the APT/Snap versions and the checksums of the other managed
 scripts, hooks and Lua files.
 
-Dangerous or rare scenarios carry the `never` tag and run only when named: `remove_site`, `aut-remove`, `aut-cfg`, `aut-users`, `ha-adm-update`, `ha-add-adm-ip`, `crt-rdg`, `crt-test`.
+Scenarios outside a normal update carry the `never` tag and run only when named: `aut-cfg`, `aut-daemons`, `aut-update`, `ha-adm-daemons`, `ha-adm-update`. The installer only installs and updates; sites, users, admin addresses and every other setting are changed in the web panel (the main domain with `easy-ha-proxy migrate-domain`).
 
 ## Components
 
@@ -113,7 +70,7 @@ The `cert` role uses the snap build of Certbot, joins `fullchain.pem + privkey.p
 
 ### Authelia
 
-Authelia and Redis run through Compose in `/opt/authelia`. Ansible creates the configuration, the users and the SMTP `.env`. Secrets must come from the Vault.
+Authelia and Redis run through Compose in `/opt/authelia`. The installer creates the configuration, the initial users and the SMTP `.env`; secrets come from the managed `secrets.yml`.
 
 ### haproxy-admin
 

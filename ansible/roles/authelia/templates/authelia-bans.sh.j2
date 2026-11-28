@@ -49,12 +49,12 @@ case "$cmd" in
       echo "ERROR: USER is missing" >&2
       usage
     fi
-    # A simple check of the user name
-    if [[ ! "$user" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
+    # A simple check of the user name (never allow leading '-')
+    if [[ ! "$user" =~ ^[a-zA-Z0-9][a-zA-Z0-9._@-]*$ ]]; then
       echo "ERROR: the user name '$user' has characters that are not allowed" >&2
       exit 1
     fi
-    "${BASE_CMD[@]}" user revoke "$user"
+    "${BASE_CMD[@]}" user revoke -- "$user"
     ;;
 
   revoke-ip)
@@ -68,7 +68,7 @@ case "$cmd" in
       echo "ERROR: not a valid IP/CIDR '$ip'" >&2
       exit 1
     fi
-    "${BASE_CMD[@]}" ip revoke "$ip"
+    "${BASE_CMD[@]}" ip revoke -- "$ip"
     ;;
 
   *)

@@ -93,7 +93,7 @@ authelia_notification_language: "en"
 
 # Relay image.
 mail_relay_image: "juanluisbaptiste/postfix:1.11.0"
-authelia_redis_image: "redis:8.10.3-alpine"
+authelia_redis_image: "redis:8.12.0-alpine"
 
 # Docker network for Authelia and related services.
 authelia_docker_network: "hadmin_net"
@@ -162,10 +162,6 @@ authelia_users_host_path: "/opt/authelia/users_database.yml"
 #  - selfservice: Ansible creates it once (force: no), then Authelia/admin manages it.
 authelia_users_mode: "selfservice"
 
-# Ansible user management through users_apply.
-# authelia_users_ops_enable is currently not used by tasks; task_stage=users_apply is the trigger.
-authelia_users_ops_enable: false
-authelia_users_ops_file: "authelia_users_ops.yml"
 
 # Optional users_database.yml backup directory.
 # Tasks default to playbook_dir + '/cache/authelia-users'.
@@ -208,3 +204,6 @@ authelia_gid: 19010
 
 authelia_redis_uid: 19011
 authelia_redis_gid: 19011
+
+# The bans, users and config daemons run from the native agent.
+native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent

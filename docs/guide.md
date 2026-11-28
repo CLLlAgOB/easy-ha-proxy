@@ -57,8 +57,9 @@ ports must not be exposed directly to untrusted networks.
 
     Clients (UDP) --> iptables DNAT (kernel) --> UDP application backends
 
-Ansible in `/opt/easy-ha-proxy/venv` manages host packages, systemd units,
-HAProxy configuration, certificates, and Docker Compose services. The
+The host agent (`/usr/local/sbin/easy-ha-proxy-agent`) applies the playbook in
+`ansible/`: host packages, systemd units, HAProxy configuration, certificates,
+and Docker Compose services. Nothing on the host runs Python. The
 unprivileged UI uses the HAProxy runtime socket for runtime operations and
 constrained helper APIs under `/run/easy-ha-proxy` for host/configuration
 changes.
@@ -75,13 +76,14 @@ The managed server must have:
   forward port;
 - production DNS A/AAAA records resolving the administration and Authelia
   domains to this server;
-- outbound access to the configured OS package repositories, GitHub, the
-  Python package index, Ansible Galaxy, container registry, Snap, Let's Encrypt,
-  and the DB-IP GeoIP data source during installation and monthly updates.
+- outbound access to the configured OS package repositories, GitHub (the
+  source and the host agent's release downloads), container registry, Snap,
+  Let's Encrypt, and the DB-IP GeoIP data source during installation and
+  monthly updates.
 
 For remote installation, the workstation only needs `bash`, `curl`, `ssh`, and
-`scp`. Ansible is installed into the project's private virtual environment on
-the managed server.
+`scp`. The managed server needs no Python: the installer fetches the host
+agent built for its source and runs it.
 
 ## Quick start
 
@@ -508,7 +510,7 @@ To restore the recorded container set without installing or
 downgrading packages, after resolving any package-manager problem run:
 
 ```bash
-sudo python3 /opt/easy-ha-proxy/source/installer/os_upgrade_guard.py --recover-runtime
+sudo easy-ha-proxy-agent os-upgrade-guard --recover-runtime
 ```
 
 Recovery attempts every recorded container even if another is missing or fails
@@ -525,9 +527,9 @@ web files than the host has.
 The host and the web application are installed as one version. The web
 application talks to the host's daemons and renders HAProxy's configuration
 from the host's template, so one without the other can break the panel. Each
-published image is labelled `io.easy-ha-proxy.source-tree` with the sha256 of
-`git ls-tree` over its build inputs (`Dockerfile`, `.dockerignore`,
-`docker/app`); Git objects are the same on every machine, so a gateway
+published image is labelled `io.easy-ha-proxy.go-panel-tree` with the sha256 of
+`git ls-tree` over its build inputs (`VERSION` and `go/panel`, which holds the
+templates and static files in `go/panel/web`); Git objects are the same on every machine, so a gateway
 computes the same value from the source it would install. When that source
 has other web files than the running image, the host update is offered only
 together with the web application ("Installed together with"), and only once
@@ -885,6 +887,48 @@ rejected restore leaves nothing behind.
 
 Nothing writes or deletes history itself: a version exists because a change was
 confirmed.
+
+### Trash
+
+Deleting something used to be final. Now what a deletion removes is kept on
+**Configuration → Trash**, from where it can be put back or deleted for good.
+By default items stay until the trash is emptied; under **Keeping** on the same
+page a term can be set instead (for example 30 days), after which items are
+deleted for good automatically -- checked hourly, and an item past its term
+can no longer be restored. Items already older than a new term go as soon as it
+is saved.
+
+- HTTP and service sites, TCP proxies and UDP forwards -- kept by the panel in
+  `/var/lib/haproxy-admin/trash/`, one file per deleted entry. A service site
+  takes its access page and attachments along and gets them back on restore;
+  deleting the site for good deletes them too.
+- HAProxy certificates, Let's Encrypt certificates (the whole lineage: live
+  links, every archived copy and the renewal settings), standby certificates,
+  external and internal certificate authorities, DNS profiles and certificate
+  delivery targets -- kept by the certificate daemon on the host in
+  `/var/lib/easy-ha-proxy/cert-trash/`, root-only, with owners and modes
+  recorded so files go back exactly as they were.
+
+The copy is taken before the deletion; if it cannot be taken, nothing is
+deleted. It is dropped again only when a failed deletion removed nothing, so the
+trash never holds something still in service, and a deletion that stopped
+part-way (certbot, for one, removes the renewal settings first) keeps its copy,
+and restoring it puts the whole copy back over exactly what was left behind.
+Emptying the trash in the middle of a deletion cannot take the copy: it is
+listed only once the deletion has gone through. A restored file never replaces
+one created meanwhile.
+Files are restored under a temporary name and renamed into place only when
+whole. Restoring goes through the same
+checks as creating: a site, proxy or forward whose name, domain or port has
+been taken meanwhile stays in the trash, and so does a file whose place is
+occupied. A restored site or TCP proxy is saved but not yet in HAProxy -- apply
+the configuration afterwards; a restored UDP forward is applied at once, as
+adding one is. A restored HAProxy certificate file is picked up at the next
+apply or reload, just as its deletion was.
+
+The page lists names and dates only; keys and credentials never leave the
+daemon. Restoring, deleting for good and changing the term are superadmin-only
+and recorded in the change log.
 
 ### Change log
 
@@ -1634,7 +1678,8 @@ the process itself is running.
 
 - `/etc/easy-ha-proxy` — managed configuration and secrets;
 - `/opt/easy-ha-proxy/source` — managed source checkout;
-- `/opt/easy-ha-proxy/venv` — private Python and Ansible environment;
+- `/usr/local/sbin/easy-ha-proxy-agent` — the host agent: installer, brokers
+  and host tools;
 - `/etc/haproxy` — HAProxy configuration and certificates;
 - `/etc/haproxy/certificate-authorities` — imported CA bundles and the
   root-only internal CA private key;
@@ -1680,55 +1725,44 @@ committed or placed in a public artifact store. The passphrase is never stored;
 download the `.enc` archive and its `.sha256` file, and keep the passphrase in a
 separate password manager.
 
-## Manual Ansible workflow
+## Running playbook entries by hand
 
-The supported assistant is the preferred interface. After creating the ignored
-local inventory and configuration files described in
-[ansible/README.md](../ansible/README.md), direct remote Ansible use
-remains available:
+The supported assistant is the preferred interface. The installer agent runs
+the playbook on the server itself, and a targeted run takes the playbook's
+tags directly ([ansible/README.md](../ansible/README.md) lists them):
 
 ```bash
-cd ansible
-ansible-galaxy collection install -r requirements.yml
-ansible-playbook --syntax-check -i inventory.ini easy-ha-proxy.yml
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t status
+sudo easy-ha-proxy-agent apply playbook --check --tags status \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
+sudo easy-ha-proxy-agent apply playbook --tags ha-adm-daemons,aut-daemons,status \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
 ```
 
-An untagged playbook run includes OS package upgrades. A local Ansible
-connection is never rebooted by the playbook: the easy-ha-proxy assistant asks
-after the upgrade and defaults to deferring the reboot. Direct playbook users
-must reboot manually, or explicitly set
-`easy_ha_proxy_reboot_after_upgrade=true` for an SSH-managed target. Review the
-plan and tags before applying it to production.
-
-Inventory, host variables, and secrets are intentionally not supplied by the
-public repository.
+`--check` shows what would change and changes nothing. An untagged run
+includes OS package upgrades and never reboots: the assistant asks after an
+upgrade and defaults to deferring the reboot.
 
 ## Development checks
 
-Every test lives in `.tests/`, which is outside the Docker build context, so
-none of it reaches the runtime image. `.github/workflows/ci.yml` runs exactly
-the commands below on Python 3.10 to 3.14 -- every interpreter a supported
-host ships, from Ubuntu 22.04 to Ubuntu 26.04 and Debian 13.
+Every Python and JavaScript test lives in `.tests/`, outside the Docker
+build context, so none of it reaches the runtime image; the Go and Rust tests
+sit beside their code (`go test ./...` in `go/agent` and `go/panel`, `cargo
+test` in `rust/guardd`). The Python tests check templates, scripts and the
+workflow, not code a host runs, so `.github/workflows/ci.yml` runs the
+commands below on one interpreter, 3.12.
 
 ```bash
-python3 -m py_compile installer/easy_ha_proxy.py
-python3 -m compileall -q docker/app \
-  ansible/roles/authelia/files \
-  ansible/roles/haproxy-admin/files
-PYTHONPATH=installer python3 -m unittest discover -s .tests -p 'test_*.py'
+pip install -r .tests/requirements.txt
+python3 -m unittest discover -s .tests -p 'test_*.py'
 
 bash -n install.sh install-local.sh install-remote.sh \
-  easy-ha-proxy-helper.sh installer/easy-ha-proxy
+  easy-ha-proxy-helper.sh installer/easy-ha-proxy installer/agent-fetch.sh
 shellcheck -S warning install.sh install-local.sh install-remote.sh \
-  easy-ha-proxy-helper.sh installer/easy-ha-proxy
+  easy-ha-proxy-helper.sh installer/easy-ha-proxy installer/agent-fetch.sh
 ruff check .   # mistakes only, see ruff.toml
 
-for script in docker/app/haproxy_admin/static/js/*.js; do node --check "$script"; done
+for script in go/panel/web/static/js/*.js; do node --check "$script"; done
 node --test .tests/js/*.test.js
-
-ansible-galaxy collection install -r ansible/requirements.yml
-ansible-playbook --syntax-check -i localhost, ansible/easy-ha-proxy.yml
 ```
 
 Page logic that decides something lives in a script without the DOM that the
@@ -1742,26 +1776,26 @@ translator's rules in `i18n.js`, which are also run against the real Russian
 catalogue. New page logic of that kind
 belongs there too, rather than in a test that searches the source for a line.
 
-After the checks pass, a push to `alpha` or `main` publishes the web
-application image from that commit (`alpha`, or `latest`), labelled with the
-fingerprint of its build inputs that gateways use to pair it with its source.
-An image built from the same web files is reused; `main` promotes the alpha
-build. This needs the repository secrets `DOCKERHUB_USERNAME` and
-`DOCKERHUB_TOKEN`; without them the job publishes nothing and says so. A pull
-request builds the image without publishing it and checks that it starts.
+After the checks pass, a push to `alpha` or `main` publishes the web panel
+image (`go-alpha`, or `go-latest`) and the native host binaries
+(`native-<channel>-<commit>`) from that commit, each labelled with what it was
+built from so gateways can pair it with their source. This needs the
+repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`; without them
+the jobs publish nothing and say so. A pull request builds the panel image
+without publishing it.
 
-Dependabot proposes updates for the requirements files, the Dockerfile and the
-workflows against `alpha`. It does not offer what cannot be taken: ansible-core
-stays on 2.17, the last series that runs on Ubuntu 22.04's Python 3.10; the
-image's Python moves only by patch releases; the installer's ranges move only
-when a release falls outside them. The weekly **Dependencies** workflow reports
+Dependabot proposes updates for the installer's requirements, the Go modules,
+the Rust crate, the panel's Dockerfile and the workflows against `alpha`. It
+does not offer what cannot be taken: the installer's ranges move only when a
+release falls outside them. The weekly **Dependencies** workflow reports
 known vulnerabilities (pip-audit) and keeps one issue open while a version
 pinned in an Ansible role (Authelia, Redis, the mail relay, the GeoIP packages)
 or a Galaxy collection has a newer release; for a collection, only releases
-that support the pinned ansible-core count.
+that support the ansible-core of the CI syntax check count. Gateways do not
+run Ansible: the installer agent runs the playbook.
 
 UI translations are JSON catalogs under
-[`docker/app/haproxy_admin/translations/`](../docker/app/haproxy_admin/translations/README.md).
+[`go/panel/web/translations/`](../go/panel/web/translations/README.md).
 Adding a catalog automatically adds its language to the interface selector;
 templates do not need to be copied. English is the canonical source language;
 other languages map English strings to translations.

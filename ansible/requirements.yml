@@ -1,6 +1,5 @@
 ---
-collections:
-  - name: ansible.posix
-    version: "2.2.2"
-  - name: community.docker
-    version: "5.4.0"
+# Nothing here is installed any more: the installer agent runs the playbook.
+# The file stays because installers before the agent refuse a downloaded
+# source without it when they update a staged source bundle.
+collections: []

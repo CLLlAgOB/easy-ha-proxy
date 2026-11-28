@@ -140,7 +140,8 @@ Step by step: [Quick Start](docs/quickstart.md) · every option:
   detection rules, a page instead of silence on the first ban step (so a real
   person can tell you), rate limits, bans in HAProxy and in the firewall.
 - **Observability.** Dashboard, monitoring history, live activity, request log,
-  configuration history and change log, email alerts, Prometheus `/metrics`.
+  configuration history and change log, a trash for deleted sites,
+  forwards and certificates, email alerts, Prometheus `/metrics`.
 - **Operations.** Updates from the panel, including OS security updates, with an
   optional night-time auto-install (off by default). Encrypted backup and
   restore with off-host copies. A command-line assistant
@@ -148,19 +149,23 @@ Step by step: [Quick Start](docs/quickstart.md) · every option:
 
 ## How it works
 
-```text
-Clients ──► HAProxy on the host (:80/:443, TCP ports)
-              ├─ your HTTP/HTTPS and TCP backends
-              ├─ login check ──► Authelia (127.0.0.1:9091) ──► Redis
-              └─ admin domain ──► web panel (127.0.0.1:5000)
-                                     └─ narrow UNIX-socket helpers on the host
-Clients (UDP) ──► kernel DNAT ──► your UDP backends
-```
+<p align="center"><img src="docs/diagrams/en/host-layout.svg" width="680" alt="What runs where: iptables, HAProxy on the host, Authelia and the web panel in Docker, root daemons behind UNIX sockets"></p>
 
-Ansible, in its own virtual environment on the server, manages packages,
-systemd units, the HAProxy configuration, certificates and the Docker Compose
-services. You never have to touch it: the assistant and the panel drive it for
-you.
+**What runs where.** Only HAProxy listens on public ports; UDP goes straight
+to your servers through kernel DNAT. Authelia and the panel listen on
+127.0.0.1 only. The panel changes nothing on the host itself: it asks the root
+daemons through UNIX sockets that only its group can open.
+
+<p align="center"><img src="docs/diagrams/en/request-path.svg" width="680" alt="The path of one request: SNI and ban check, TLS and filters, login check in Authelia, site backend; the log feeds guardd, whose bans the entry checks again"></p>
+
+**One request.** A banned address is dropped before TLS. Every request is
+logged; guardd reads the log, and the bans it makes are checked at the entry
+of the next connection.
+
+The host agent applies the playbook that manages packages, systemd units, the
+HAProxy configuration, certificates and the Docker Compose services; nothing
+on the server runs Python. You never have to touch it: the assistant and the
+panel drive it for you.
 
 ## Documentation
 

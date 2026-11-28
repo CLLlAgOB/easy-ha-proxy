@@ -1,4 +1,4 @@
-ansible-core~=2.17.0
-argon2-cffi~=25.1
-PyYAML~=6.0
-cryptography>=38,<51
+# Nothing to install: the installer is the host agent (installer/easy-ha-proxy).
+# The updater of releases before 1.2.0 checks that a downloaded source holds
+# this file and installer/easy_ha_proxy.py; remove both once no supported
+# gateway runs such a release.

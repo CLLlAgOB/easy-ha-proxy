@@ -3,10 +3,11 @@ set -Eeuo pipefail
 
 product="easy-ha-proxy"
 repository="${EASY_HA_PROXY_REPOSITORY:-https://github.com/CLLlAgOB/easy-ha-proxy.git}"
-branch="${EASY_HA_PROXY_BRANCH:-main}"
+config_dir="${EASY_HA_PROXY_CONFIG_DIR:-/etc/easy-ha-proxy}"
 install_root="${EASY_HA_PROXY_HOME:-/opt/easy-ha-proxy}"
 source_dir="${install_root}/source"
-venv_dir="${install_root}/venv"
+agent_bin="${EASY_HA_PROXY_AGENT_BIN:-/usr/local/sbin/easy-ha-proxy-agent}"
+staged_agent="${EASY_HA_PROXY_STAGED_AGENT:-/var/lib/easy-ha-proxy/native-staging/bootstrap/easy-ha-proxy-agent}"
 prepare_only=false
 skip_bootstrap_dependencies=false
 use_existing_source="${EASY_HA_PROXY_USE_EXISTING_SOURCE:-false}"
@@ -35,6 +36,33 @@ die() {
   printf '\n[%s] ERROR: %s\n' "${product}" "$*" >&2
   exit 1
 }
+
+# The branch this gateway follows, which checks compare with and updates
+# fetch: an explicit EASY_HA_PROXY_BRANCH, else the branch the installer
+# recorded in metadata.yml (the alpha channel records alpha), else main.
+# easy-ha-proxy-helper.sh and install-local.sh resolve it the same way.
+gateway_branch() {
+  local recorded=""
+  if [[ -n "${EASY_HA_PROXY_BRANCH:-}" ]]; then
+    printf '%s\n' "${EASY_HA_PROXY_BRANCH}"
+    return
+  fi
+  if [[ -r "${config_dir}/metadata.yml" ]]; then
+    recorded="$(
+      awk -F':[[:space:]]*' '$1 == "branch" {gsub(/["\047[:space:]]/, "", $2); print $2; exit}' \
+        "${config_dir}/metadata.yml" 2>/dev/null || true
+    )"
+  fi
+  # Only a plain branch name is taken from the file.
+  if [[ "${recorded}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ &&
+        "${recorded}" != *..* && "${recorded}" != *//* &&
+        "${recorded}" != */ && "${recorded}" != *.lock ]]; then
+    printf '%s\n' "${recorded}"
+  else
+    printf 'main\n'
+  fi
+}
+branch="$(gateway_branch)"
 
 if [[ "${EUID}" -ne 0 ]]; then
   die "Run as root, for example: sudo bash /tmp/easy-ha-proxy-install-local.sh"
@@ -87,8 +115,29 @@ if [[ "${skip_bootstrap_dependencies}" != "true" ]]; then
   export DEBIAN_FRONTEND=noninteractive
   log "Installing bootstrap dependencies"
   apt-get update
-  apt-get install -y --no-install-recommends \
-    ca-certificates curl git openssl python3 python3-apt python3-pip python3-venv
+  # On a fresh image this upgrades git and libraries. needrestart would then
+  # restart the services using them, systemd-resolved among them, and the
+  # clone below would fail with "Could not resolve host" while the resolver
+  # starts again. Services left on the old libraries are restarted from the
+  # OS security page or by the next reboot.
+  NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l \
+    apt-get install -y --no-install-recommends ca-certificates curl git openssl
+fi
+
+# Any resolver restart (needrestart above, cloud-init, a DHCP renewal) leaves
+# a few seconds without DNS: wait for the repository host before the first
+# network call instead of failing the whole installation on it.
+repository_host="$(sed -nE 's#^https?://([^/@]*@)?([^/:]+).*#\2#p' <<<"${repository}")"
+if [[ "${use_existing_source}" != "true" && -n "${repository_host}" ]]; then
+  for attempt in $(seq 1 30); do
+    if getent hosts "${repository_host}" >/dev/null 2>&1; then
+      break
+    fi
+    if [[ "${attempt}" -eq 1 ]]; then
+      log "Waiting for ${repository_host} to resolve"
+    fi
+    sleep 1
+  done
 fi
 
 install -d -m 0755 "${install_root}"
@@ -96,10 +145,8 @@ install -d -m 0755 "${install_root}"
 if [[ "${use_existing_source}" == "true" ]]; then
   for required in \
     installer/easy-ha-proxy \
-    installer/easy_ha_proxy.py \
-    installer/requirements.txt \
-    ansible/easy-ha-proxy.yml \
-    ansible/requirements.yml; do
+    installer/agent-fetch.sh \
+    ansible/easy-ha-proxy.yml; do
     [[ -f "${source_dir}/${required}" ]] ||
       die "Staged source is incomplete: ${source_dir}/${required}"
   done
@@ -121,24 +168,23 @@ else
   git clone --depth=1 --branch "${branch}" "${repository}" "${source_dir}"
 fi
 
-if [[ "${skip_bootstrap_dependencies}" == "true" ]]; then
-  log "Reusing the prepared Python and Ansible control plane"
-  [[ -x "${venv_dir}/bin/python" ]] ||
-    die "Prepared Python environment is missing: ${venv_dir}/bin/python"
-  [[ -x "${venv_dir}/bin/ansible-playbook" ]] ||
-    die "Prepared Ansible executable is missing: ${venv_dir}/bin/ansible-playbook"
+# The installer is the host agent's "cli". A host without an agent that runs
+# it gets the one built for this source from the project's GitHub release.
+# shellcheck source=installer/agent-fetch.sh
+source "${source_dir}/installer/agent-fetch.sh"
+source_revision="$(easy_ha_proxy_source_revision "${source_dir}" || true)"
+if easy_ha_proxy_agent_matches_source "${agent_bin}" "${source_revision}" ||
+   easy_ha_proxy_agent_matches_source "${staged_agent}" "${source_revision}"; then
+  log "The host agent is ready"
+elif [[ "${skip_bootstrap_dependencies}" == "true" ]]; then
+  easy_ha_proxy_agent_runs_cli "${agent_bin}" || easy_ha_proxy_agent_runs_cli "${staged_agent}" ||
+    die "The prepared host agent is missing: ${agent_bin}"
 else
-  log "Creating isolated Python environment"
-  python3 -m venv "${venv_dir}"
-  "${venv_dir}/bin/pip" install --disable-pip-version-check --upgrade pip
-  "${venv_dir}/bin/pip" install \
-    --disable-pip-version-check \
-    -r "${source_dir}/installer/requirements.txt"
-
-  log "Installing Ansible collections"
-  ANSIBLE_LOCAL_TEMP="${install_root}/tmp/ansible" \
-    "${venv_dir}/bin/ansible-galaxy" collection install \
-    -r "${source_dir}/ansible/requirements.yml"
+  log "Fetching the host agent"
+  easy_ha_proxy_fetch_agent "${source_dir}" "${staged_agent}" ||
+    die "The host agent could not be fetched."
+  easy_ha_proxy_agent_runs_cli "${staged_agent}" ||
+    die "The fetched host agent cannot run the installer; it is older than this source."
 fi
 
 chmod 0755 \

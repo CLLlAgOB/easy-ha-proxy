@@ -18,6 +18,13 @@ session:
     - domain: "{{ authelia_cookie_domain }}"
       authelia_url: "{{ authelia_portal_url }}"
       default_redirection_url: "{{ authelia_default_redirection_url }}"
+{# Extra sign-in domains (vars.yml authelia_extra_domains, set on the panel's
+   Authelia settings page): a cookie domain each, with its own portal. #}
+{% for _extra in authelia_extra_domains | default([], true) %}
+    - domain: "{{ _extra.domain }}"
+      authelia_url: "https://{{ _extra.portal }}"
+      default_redirection_url: "https://{{ _extra.portal }}/access_granted"
+{% endfor %}
 {% if authelia_session_redis_enabled | default(true) %}
   redis:
     host: "{{ authelia_session_redis_host }}"
@@ -83,30 +90,43 @@ totp:
   period: {{ authelia_totp_period }}
   skew: {{ authelia_totp_skew }}
 
-access_control:
-  default_policy: "{{ authelia_default_policy }}"
-  rules:
-    {{ authelia_access_control_rules | to_nice_yaml(indent=2) | indent(4) }}
 {# Access-gate sites need a login rule or Authelia's default_policy=deny would
    reject them. Generate one_factor rules here so they survive every full apply
    (the web UI also adds them at save time for immediate effect). Domains
-   already covered by a managed rule above are skipped. #}
+   already covered by a managed rule are skipped.
+   The generated rules join the managed ones in one list. An update first copies
+   the live rules into authelia.yml, generated ones included, and this file must
+   render the same before and after that copy: rendered apart, they came out
+   with a blank line the copy then dropped, so the first update after an
+   installation rewrote the file and restarted Authelia. #}
 {% set _managed_domains = [] %}
 {% for _rule in authelia_access_control_rules | default([]) %}
 {%   set _rd = _rule.domain | default([]) %}
 {%   if _rd is string %}{% set _ = _managed_domains.append(_rd) %}
 {%   else %}{% for _d in _rd %}{% set _ = _managed_domains.append(_d) %}{% endfor %}{% endif %}
 {% endfor %}
-{% set _gate_domains = [] %}
+{% set _gate_rules = [] %}
 {% for _site in sites | default([]) %}
 {%   if _site.access_gate | default(false) %}
 {%     for _hn in [_site.domain] + (_site.alt_names | default([])) %}
-{%       if _hn and _hn not in _managed_domains and _hn not in _gate_domains %}
-{%         set _ = _gate_domains.append(_hn) %}
-    - domain: {{ _hn }}
-      policy: one_factor
+{%       if _hn and _hn not in _managed_domains %}
+{%         set _ = _managed_domains.append(_hn) %}
+{%         set _ = _gate_rules.append({'domain': _hn, 'policy': 'one_factor'}) %}
 {%       endif %}
 {%     endfor %}
 {%   endif %}
 {% endfor %}
+{# The portal of each extra sign-in domain answers /access_granted after a
+   sign-in, as aut_domain does; the panel adds this rule when the domain is
+   added, and this keeps it on a gateway whose rules lost it. #}
+{% for _extra in authelia_extra_domains | default([], true) %}
+{%   if _extra.portal | default('') and _extra.portal not in _managed_domains %}
+{%     set _ = _managed_domains.append(_extra.portal) %}
+{%     set _ = _gate_rules.append({'domain': _extra.portal, 'policy': 'one_factor', 'resources': ['^/access_granted/?$']}) %}
+{%   endif %}
+{% endfor %}
+access_control:
+  default_policy: "{{ authelia_default_policy }}"
+  rules:
+    {{ (authelia_access_control_rules + _gate_rules) | to_nice_yaml(indent=2) | indent(4) }}
 

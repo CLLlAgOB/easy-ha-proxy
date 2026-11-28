@@ -11,7 +11,7 @@ const path = require("node:path");
 
 const {russianCatalogue, recordingLabel} = require("./catalogue.js");
 
-const APP = path.join(__dirname, "../../docker/app/haproxy_admin");
+const APP = path.join(__dirname, "../../go/panel/web");
 const core = require(path.join(APP, "static/js/live_activity_core.js"));
 
 const HOUR = 3600;

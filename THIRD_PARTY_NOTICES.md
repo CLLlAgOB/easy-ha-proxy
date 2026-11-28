@@ -12,7 +12,7 @@ provenance and modification notices.
 | `ansible/roles/authelia/templates/Event.{html,txt}.{en,ru}.j2` | Adapted from official Authelia notification templates; English/Russian variants and Ansible/Jinja wrapping | Apache-2.0 |
 | `ansible/roles/authelia/templates/IdentityVerificationJWT.{html,txt}.{en,ru}.j2` | Adapted from official Authelia notification templates; English/Russian variants and Ansible/Jinja wrapping | Apache-2.0 |
 | `ansible/roles/authelia/templates/IdentityVerificationOTC.{html,txt}.{en,ru}.j2` | Adapted from official Authelia notification templates; English/Russian variants and Ansible/Jinja wrapping | Apache-2.0 |
-| `docker/app/haproxy_admin/static/vendor/flag-icons/flags/4x3/*.svg` | Vendored from `lipis/flag-icons` v7.5.0 | MIT |
+| `go/panel/web/static/vendor/flag-icons/flags/4x3/*.svg` | Vendored from `lipis/flag-icons` v7.5.0 | MIT |
 | `/etc/haproxy/geoip/releases/*/dbip-country-lite.mmdb` and derived `*.geo`/`*.cidr` files on managed servers | DB-IP Country Lite data downloaded at installation/update time; country CIDRs are derived locally from the same release | CC BY 4.0 |
 
 The complete MIT notices are included in the corresponding source-file headers.

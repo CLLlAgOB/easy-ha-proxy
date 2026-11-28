@@ -5,11 +5,11 @@ After=network.target haproxy.service
 Wants=network.target
 
 [Service]
+Environment="EASY_HA_PROXY_PANEL_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
 Type=simple
 User=root
 Group={{ app_group | default('hadmin') }}
 
-Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=-{{ haproxy_admin_env_file }}
 Environment="METRICSD_SOCKET_PATH={{ metricsd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-metricsd.sock') }}"
 Environment="METRICSD_SOCKET_GROUP={{ metricsd_socket_group | default(app_group | default('hadmin')) }}"
@@ -18,10 +18,9 @@ Environment="METRICSD_DATABASE={{ metricsd_database_path | default('/var/lib/eas
 # Reporting to the alert engine is optional and best effort; without
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
-Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/easy-ha-proxy-metricsd.py', rstrip=false) | hash('sha256') }}"
+EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
 
-ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-metricsd.py
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} metricsd
 
 Restart=always
 RestartSec=5

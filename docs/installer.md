@@ -17,8 +17,8 @@ bash /tmp/easy-ha-proxy-install.sh
 Without arguments, the assistant:
 
 1. Asks for English or Russian; pressing Enter selects English.
-2. Looks for the installed CLI, managed configuration, private Python/Ansible
-   venv, playbook, and system components.
+2. Looks for the installed CLI, managed configuration, host agent, playbook,
+   and system components.
 3. Classifies the system as clean, partially installed, legacy, or managed.
 4. Detects production or test mode.
 5. Shows only applicable actions and asks for confirmation before changes.
@@ -322,51 +322,11 @@ and file mode `0600`. Preparation:
 - transfers existing Authelia and SMTP secrets without printing them;
 - creates a local inventory and migration metadata.
 
-This is a local operation: nothing is sent to the server, Ansible is not run,
-and services are not changed. `prepared-config` contains secrets and must never
+This is a local operation: nothing is sent to the server and services are not
+changed. `prepared-config` contains secrets and must never
 be committed.
 
-### Check mode for prepared legacy configuration
-
-After `prepared-config` exists:
-
-```bash
-bash ./install.sh plan-legacy
-```
-
-The command selects the newest prepared configuration and discovered remote
-inventory, prints their paths, and requests confirmation. It then runs:
-
-1. `ansible-playbook --syntax-check`;
-2. a restricted set of update/configuration tags with `--check`;
-3. read-only status tasks.
-
-`--diff` is deliberately omitted so secret-bearing templates do not enter the
-output. The full log is stored beside the snapshot as
-`legacy-plan-<date>.log` with mode `0600`. Nothing is applied.
-
-Explicit paths:
-
-```bash
-bash ./install.sh plan-legacy \
-  "$HOME/easy-ha-proxy-backups/legacy-<date>/prepared-config" \
-  ./inventory.ini
-```
-
-If the plan reports `Copy HAProxy configuration`, inspect a separate protected
-diff before applying anything:
-
-```bash
-bash ./install.sh diff-legacy-haproxy
-```
-
-This runs only `ha-cfg` with `--check --diff`, validates the rendered
-configuration with `haproxy -c`, and saves
-`legacy-haproxy-diff-<date>.log` with mode `0600`. HAProxy is not reloaded.
-
 ### Adopt a legacy server
-
-After `plan-legacy` succeeds and the HAProxy diff has been reviewed:
 
 ```bash
 bash ./install.sh stage-legacy
@@ -389,8 +349,8 @@ command:
   obsolete PEM files, or archives;
 - installs prepared configuration under `/etc/easy-ha-proxy` with `0700/0600`
   permissions;
-- creates `/opt/easy-ha-proxy/source`, the private Python venv, and the
-  `easy-ha-proxy`/`easy-ha-proxy-assistant` commands;
+- creates `/opt/easy-ha-proxy/source`, fetches the host agent built for that
+  source, and creates the `easy-ha-proxy`/`easy-ha-proxy-assistant` commands;
 - stops when target directories already exist.
 
 No playbook runs at this stage. Images are not downloaded, services are not
@@ -401,18 +361,20 @@ After staging, run the read-only server plan:
 sudo easy-ha-proxy plan
 ```
 
-If it completes with `failed=0`, services remain healthy, and the only real
-configuration change is synchronization of `haproxy.cfg.j2` for the UI,
-finalize adoption:
+The plan lists every step that would change something; `Copy HAProxy
+configuration` there means the rendered `haproxy.cfg` differs from the live
+one. If it completes with `failed=0`, services remain healthy, and the only
+real configuration change is synchronization of `haproxy.cfg.j2` for the UI,
+finalize adoption on the server:
 
 ```bash
-bash ./install.sh finalize-legacy
+sudo easy-ha-proxy-agent apply playbook --tags ha-adm-cfg,status \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
 ```
 
-The command requires `APPLY`, runs only `ha-adm-cfg,status`, and saves
-`legacy-finalize-<date>.log`. It does not update Docker, download images, or
-replace active `/etc/haproxy/haproxy.cfg`. It synchronizes the template the UI
-will use for later site changes.
+This runs only `ha-adm-cfg,status`: it does not update Docker, download
+images, or replace active `/etc/haproxy/haproxy.cfg`. It synchronizes the
+template the UI will use for later site changes.
 
 ### Synchronize local source
 
@@ -510,9 +472,9 @@ Quick GeoIP update FAQ:
   active release. A first install can continue without country display only
   when HAProxy GeoIP access filtering is disabled.
 - **What about a very old unmanaged installation?** Do not run a full apply
-  directly. Use `snapshot-legacy`, `prepare-legacy`, `plan-legacy`,
-  `stage-legacy`, and `finalize-legacy` first; after adoption, run a normal full
-  update to migrate the GeoIP updater and UI.
+  directly. Use `snapshot-legacy`, `prepare-legacy` and `stage-legacy`, review
+  `sudo easy-ha-proxy plan` on the server and finalize as above; after adoption,
+  run a normal full update to migrate the GeoIP updater and UI.
 
 ## Selective updates in HAProxy Admin
 
@@ -588,7 +550,7 @@ archive and `.sha256` file are downloaded automatically to
 The core payload contains:
 
 - `/etc/easy-ha-proxy` configuration, metadata, and secrets;
-- the exact `/opt/easy-ha-proxy/source` version without its disposable venv;
+- the exact `/opt/easy-ha-proxy/source` version;
 - HAProxy, GeoIP, managed iptables ban rules, AppArmor, rsyslog, logrotate, and
   sysctl configuration;
 - all of `/etc/letsencrypt`, including accounts, renewal configuration, and
@@ -598,7 +560,7 @@ The core payload contains:
 - systemd units/drop-ins and all managed helper scripts;
 - OS, package, systemd, container, and image-digest manifests.
 
-Container images, system packages, and the Python venv are not copied; the
+Container images, system packages, and the host agent are not copied; the
 installer reproduces them for the new server architecture.
 
 `/etc/iptables/rules.v4` and `rules.v6` are runtime snapshots rather than
@@ -645,9 +607,9 @@ Restore:
 4. Merges existing `authorized_keys` and does not restart sshd.
 5. Restores data, preserves archived source as
    `/opt/easy-ha-proxy/source.from-backup.<date>.<pid>`, activates current
-   recovery source from the controller, rebuilds the venv, installs
-   dependencies, and applies configuration. Restored iptables runtime snapshots
-   are disabled before Ansible starts.
+   recovery source from the controller, installs dependencies, and applies
+   configuration with the host agent. Restored iptables runtime snapshots are
+   disabled before the playbook starts.
 6. Does not reissue certificates automatically; restored certificates and
    Certbot renewal state are used.
 
@@ -692,6 +654,9 @@ For a migration from `old.example.com` to `new.example.net`, the command:
 
 Old certificates are not removed immediately, allowing manual rollback.
 Authelia sessions bound to the previous cookie domain may require login again.
+Extra Authelia sign-in domains (added on the panel's Authelia settings page)
+stay as they are; a new root domain that equals one of them, or lies above or
+below one, is refused until that sign-in domain is removed.
 
 Plan only from the workstation:
 
@@ -740,7 +705,7 @@ A complete managed installation requires all of:
 
 - `/usr/local/bin/easy-ha-proxy` or the internal CLI;
 - `/etc/easy-ha-proxy/metadata.yml`;
-- `/opt/easy-ha-proxy/venv/bin/python`;
+- `/usr/local/sbin/easy-ha-proxy-agent`;
 - `/opt/easy-ha-proxy/source/ansible/easy-ha-proxy.yml`.
 
 The configuration also records completion only after the main playbook

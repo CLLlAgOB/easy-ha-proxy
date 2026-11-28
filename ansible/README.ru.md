@@ -1,63 +1,30 @@
-# Ручное развёртывание easy-ha-proxy
+# Playbook и роли
 
-Главный плейбук `easy-ha-proxy.yml` устанавливает и настраивает HAProxy, Certbot, GeoIP ACL, Authelia, Docker-версию `haproxy-admin` и вспомогательные systemd-демоны.
+`easy-ha-proxy.yml` и роли в `roles/` описывают шлюз: HAProxy, Certbot,
+GeoIP ACL, Authelia, контейнер `haproxy-admin` и вспомогательные
+systemd-демоны. Агент установки (`easy-ha-proxy-agent apply playbook`) читает
+их на сервере — записи и теги playbook, defaults, шаблоны и файлы ролей — и
+меняет только то, что отличается от хоста. Ansible не участвует.
+[English version](README.md).
 
-Для одного сервера рекомендуется команда `easy-ha-proxy`, которая устанавливает локальный Ansible в venv и вызывает этот же playbook. Этот документ описывает ручной удалённый режим. [English version](README.md).
+Устанавливают и обновляют командой `easy-ha-proxy`. Управляемая конфигурация
+лежит в `/etc/easy-ha-proxy` (`vars.yml`, `authelia.yml`,
+`authelia_users_initial.yml`, `websites.yml`, `tcp.yml`, `secrets.yml`,
+`inventory.ini`) и никогда не попадает в Git.
 
-## Требования
+## Запуск записей
 
-- управляющая машина с Ansible;
-- целевой Debian/Ubuntu-хост с SSH и `sudo`;
-- коллекции `ansible.posix` и `community.docker`;
-- Docker Compose v2 на целевом хосте для контейнерных сервисов;
-- Ansible Vault password для файлов `group_vars/all/*.yml`.
-
-Установка коллекций:
-
-```bash
-cd ansible
-ansible-galaxy collection install -r requirements.yml
-```
-
-## Локальная конфигурация
-
-`easy-ha-proxy.yml` по умолчанию ожидает группу `easy_ha_proxy` в ручном `inventory.ini` и загружает:
-
-- `vars.yml` — домены, HAProxy, Certbot, SMTP и общие параметры;
-- `authelia.yml` — несекретные параметры Authelia;
-- `authelia_users_initial.yml` — начальные пользователи;
-- `websites.yml` — HTTP/HTTPS-сайты;
-- `tcp.yml` — TCP-прокси.
-
-`inventory.ini`, `vars.yml`, `websites.yml`, `tcp.yml`,
-`authelia_users_initial.yml` и весь `group_vars/` считаются локальными файлами
-и исключены из Git. Даже зашифрованные Vault-файлы не публикуются: пароль Vault
-может быть раскрыт или подобран отдельно.
-
-Минимальный inventory:
-
-```ini
-[easy_ha_proxy]
-proxy01 ansible_host=203.0.113.10 ansible_user=ansible
-```
-
-Перед первым запуском обязательно замените начальных пользователей и Argon2-хеши в `authelia_users_initial.yml`. Не храните рядом комментарии с исходными паролями.
-
-## Проверка и запуск
-
-Из каталога `ansible/`:
+Точечный запуск принимает теги playbook; `--check` показывает, что изменилось
+бы, и ничего не меняет:
 
 ```bash
-ansible-playbook --syntax-check -i inventory.ini easy-ha-proxy.yml
-ansible-playbook -i inventory.ini easy-ha-proxy.yml --list-tags
-ansible-playbook -i inventory.ini easy-ha-proxy.yml
+sudo easy-ha-proxy-agent apply playbook --check --tags status   --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
+sudo easy-ha-proxy-agent apply playbook --tags ha-install,ha-cfg   --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
 ```
 
-Полный прогон обновляет пакеты, выпускает сертификаты и меняет системную
-конфигурацию. При `ansible_connection=local` reboot всегда откладывается до решения
-помощника или администратора. Автоматический reboot для узла, управляемого по SSH,
-включается только явно: `-e easy_ha_proxy_reboot_after_upgrade=true`. Для точечных операций
-используйте теги:
+Запуск без тегов включает обновление пакетов ОС и никогда не перезагружает
+сервер: помощник спрашивает после обновления и по умолчанию откладывает
+перезагрузку.
 
 | Назначение | Тег |
 | --- | --- |
@@ -82,23 +49,12 @@ ansible-playbook -i inventory.ini easy-ha-proxy.yml
 | Проверка состояния | `status` |
 | Добавление сайта | `addsite` |
 
-Примеры:
-
-```bash
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t ha-install,ha-cfg
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t aut-install
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t ha-adm-install,ha-adm-cfg,ha-adm-start
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t addsite
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t ha-adm-daemons,aut-daemons,status
-ansible-playbook -i inventory.ini easy-ha-proxy.yml -t status
-```
-
 Точечный daemon-stage копирует все управляемые скрипты демонов идемпотентно:
 неизменившиеся службы не перезапускаются. Полный status дополнительно
 проверяет iptables loader, systemd timers, journald, Certbot, cron/logrotate,
 версии APT/Snap и контрольные суммы остальных управляемых scripts/hooks/Lua.
 
-Опасные или редкие сценарии имеют тег `never` и запускаются явно: `remove_site`, `aut-remove`, `aut-cfg`, `aut-users`, `ha-adm-update`, `ha-add-adm-ip`, `crt-rdg`, `crt-test`.
+Сценарии вне обычного обновления имеют тег `never` и запускаются явно: `aut-cfg`, `aut-daemons`, `aut-update`, `ha-adm-daemons`, `ha-adm-update`. Установщик только устанавливает и обновляет; сайты, пользователи, адреса администраторов и остальные настройки меняются в веб-панели (основной домен — командой `easy-ha-proxy migrate-domain`).
 
 ## Компоненты
 
@@ -112,7 +68,7 @@ ansible-playbook -i inventory.ini easy-ha-proxy.yml -t status
 
 ### Authelia
 
-Authelia и Redis запускаются через Compose в `/opt/authelia`. Конфигурация, пользователи и SMTP `.env` создаются Ansible. Секреты должны приходить из Vault.
+Authelia и Redis запускаются через Compose в `/opt/authelia`. Конфигурацию, начальных пользователей и SMTP `.env` создаёт установщик; секреты берутся из управляемого `secrets.yml`.
 
 ### haproxy-admin
 

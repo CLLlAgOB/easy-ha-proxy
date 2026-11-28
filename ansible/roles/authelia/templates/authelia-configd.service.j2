@@ -4,10 +4,11 @@ After=network.target docker.service
 Requires=docker.service
 
 [Service]
+Environment="EASY_HA_PROXY_PANEL_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
 Type=simple
 User=root
 Group={{ authelia_log_reader_group }}
-ExecStart=/usr/local/sbin/authelia-configd.py
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} authelia-configd
 Restart=always
 RestartSec=2
 
@@ -26,10 +27,9 @@ Environment="AUTHELIA_NOTIFICATION_ROOT={{ authelia_root_dir }}"
 Environment="AUTHELIA_NOTIFICATION_STATE_DIR=/var/lib/easy-ha-proxy"
 Environment="AUTHELIA_NOTIFICATION_UID={{ authelia_uid }}"
 Environment="AUTHELIA_NOTIFICATION_CLIENT_USER={{ authelia_log_reader_user }}"
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/authelia-configd.py', rstrip=false) | hash('sha256') }}"
 
 PrivateTmp=yes
-ProtectSystem=full
+ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths={{ authelia_root_dir }} {{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}
 NoNewPrivileges=yes
@@ -39,7 +39,9 @@ RuntimeDirectory=easy-ha-proxy
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 StateDirectory=easy-ha-proxy
-StateDirectoryMode=0700
+# haproxy-healthd names the same directory with 0750; one mode, or the
+# last unit started decides it.
+StateDirectoryMode=0750
 UMask=0007
 
 [Install]

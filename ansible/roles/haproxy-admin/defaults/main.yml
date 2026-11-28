@@ -5,7 +5,6 @@ app_user: haproxyadmin
 app_group: hadmin
 haproxy_admin_proxy_secret: "{{ authelia_session_secret | default('') }}"
 hapadm_ipset_name: haproxy_ban
-venv_dir: "{{ app_dir }}/venv"
 whitelist_global_file: /etc/haproxy/whitelist.ip
 whitelist_geo_file: /etc/haproxy/geoip/whitelist.geo
 ui_exclude_backends_exact:
@@ -155,8 +154,11 @@ hadmin_gid: ""
 haproxy_admin_root_dir: "{{ app_dir }}"
 haproxy_admin_data_dir: "{{ haproxy_admin_root_dir }}/data"
 
-# Container image and name.
+# Container image and name. haproxy_admin_image carries the release channel
+# (set-channels writes it); the panel runs the matching go-<channel> image.
 haproxy_admin_image: "clllagob/haproxy-admin-ui:latest"
+haproxy_admin_image_channel: "{{ 'alpha' if haproxy_admin_image.endswith((':alpha', ':go-alpha')) else 'latest' }}"
+haproxy_admin_go_image: "{{ haproxy_admin_image | regex_replace(':[^/:]+$', '') }}:go-{{ haproxy_admin_image_channel }}"
 haproxy_admin_container_name: "haproxy-admin"
 
 # UI port exposed on localhost.
@@ -175,6 +177,7 @@ haproxy_admin_debug_routes: false
 
 # haproxy-admin .env path containing socket and application settings.
 haproxy_admin_env_file: "{{ haproxy_admin_root_dir }}/.env"
+daemons_env_file: /etc/easy-ha-proxy/daemons.env
 
 # Helper daemon sockets.
 certd_socket_path: /run/easy-ha-proxy/haproxy-certd.sock
@@ -208,7 +211,6 @@ updated_state_root: /var/lib/easy-ha-proxy/update-web
 updated_jobs_dir: "{{ updated_state_root }}/jobs"
 updated_source_dir: /opt/easy-ha-proxy/source
 updated_config_dir: /etc/easy-ha-proxy
-updated_python_path: /opt/easy-ha-proxy/venv/bin/python
 updated_cli_path: /usr/local/bin/easy-ha-proxy
 updated_max_request_bytes: 32768
 updated_max_response_bytes: 2097152
@@ -259,3 +261,27 @@ backup_schedule_enabled: true
 backup_schedule_oncalendar: "*-*-* 03:20:00"
 backup_schedule_jitter: 20m
 backup_schedule_timeout: 8h
+
+# --- Native host binaries ---
+# The Rust guardd-core and the static Go easy-ha-proxy-agent are the host
+# daemons and tools; the native stage installs them from one of the sources
+# below.
+native_agent_bin: /usr/local/sbin/easy-ha-proxy-agent
+
+native_guardd_bin: /usr/local/sbin/guardd-core
+# Default multi-arch OCI bundle image published by CI (linux/amd64 + linux/arm64).
+# Operators can override with native_local_bundle_dir or an HTTPS native_release_base_url
+# together with mandatory SHA-256 checksums per architecture.
+native_release_image: "clllagob/haproxy-admin-ui:native-{{ haproxy_admin_image_channel }}"
+# Install the binaries CI built from the checked-out revision (the channel tag
+# plus "-<12 hex of the commit>"), never whatever the channel tag points at now.
+native_release_pin_revision: true
+# Optional Sigstore Cosign verification for native OCI release images.
+# When enabled, cosign must be installed and verification must succeed before
+# any binary is extracted from the image (fails closed).
+native_release_verify_signature: false
+native_release_cosign_identity_regexp: "^https://github\\.com/CLLlAgOB/easy-ha-proxy/\\.github/workflows/ci\\.yml@refs/heads/(main|alpha)$"
+native_release_cosign_oidc_issuer: "https://token.actions.githubusercontent.com"
+native_local_bundle_dir: ""
+native_release_base_url: ""
+native_release_checksums: {}

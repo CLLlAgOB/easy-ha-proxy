@@ -3,13 +3,41 @@ set -euo pipefail
 
 install_root="${EASY_HA_PROXY_HOME:-/opt/easy-ha-proxy}"
 source_dir="${EASY_HA_PROXY_SOURCE_DIR:-${install_root}/source}"
-python_bin="${install_root}/venv/bin/python"
-
-if [[ ! -x "${python_bin}" ]]; then
-  echo "easy-ha-proxy: Python environment not found: ${python_bin}" >&2
-  echo "Run install-local.sh first." >&2
-  exit 1
-fi
+agent_bin="${EASY_HA_PROXY_AGENT_BIN:-/usr/local/sbin/easy-ha-proxy-agent}"
+staged_agent="${EASY_HA_PROXY_STAGED_AGENT:-/var/lib/easy-ha-proxy/native-staging/bootstrap/easy-ha-proxy-agent}"
 
 export EASY_HA_PROXY_SOURCE_DIR="${source_dir}"
-exec "${python_bin}" "${source_dir}/installer/easy_ha_proxy.py" "$@"
+
+source_revision=""
+if [[ -r "${source_dir}/installer/agent-fetch.sh" ]]; then
+  # shellcheck source=installer/agent-fetch.sh
+  source "${source_dir}/installer/agent-fetch.sh"
+  source_revision="$(easy_ha_proxy_source_revision "${source_dir}" || true)"
+else
+  easy_ha_proxy_agent_matches_source() {
+    [[ -x "$1" ]] && "$1" cli --probe >/dev/null 2>&1
+  }
+fi
+
+# The installer is the host agent's "cli".
+if easy_ha_proxy_agent_matches_source "${agent_bin}" "${source_revision}"; then
+  exec "${agent_bin}" cli "$@"
+fi
+if easy_ha_proxy_agent_matches_source "${staged_agent}" "${source_revision}"; then
+  exec "${staged_agent}" cli "$@"
+fi
+
+# No agent that runs the installer yet: a fresh host, or the first update
+# from a release whose installer was Python. Fetch the agent built for this
+# source; the native stage then installs it for good.
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "easy-ha-proxy: the host agent is not installed yet; run this as root to fetch it." >&2
+  exit 1
+fi
+[[ -r "${source_dir}/installer/agent-fetch.sh" ]] || exit 1
+easy_ha_proxy_fetch_agent "${source_dir}" "${staged_agent}"
+if ! easy_ha_proxy_agent_runs_cli "${staged_agent}"; then
+  echo "easy-ha-proxy: the fetched host agent cannot run the installer; it is older than this source." >&2
+  exit 1
+fi
+exec "${staged_agent}" cli "$@"

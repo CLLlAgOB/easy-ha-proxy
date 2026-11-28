@@ -31,7 +31,7 @@
     - name: Protect existing HAProxy before host or system updates
       ansible.builtin.import_role:
         name: haproxy
-        tasks_from: protection.yml
+        tasks_from: protection
       tags: [ha-install, upgrade]
 
     - name: Load easy-ha-proxy local secrets
@@ -106,6 +106,7 @@
               (sites | map(attribute='domain') | list)
               + [ admin_domain ]
               + ( [ aut_domain ] if authelia_enabled | default(false) | bool else [] )
+              + ( (authelia_extra_domains | default([], true)) | map(attribute='portal') | select | list if authelia_enabled | default(false) | bool else [] )
           }}
       tags: always
 
@@ -139,25 +140,6 @@
         - crt-hooks
         - crt-install
 
-    - role: cert
-      task_stage: remove_orphans
-      tags:
-        - never
-        - remove_site
-
-    - role: cert
-      task_stage: rdg
-      tags:
-        - crt-rdg
-        - cert
-        - never
-
-    - role: cert
-      task_stage: test
-      tags:
-        - crt-test
-        - never
-
     - role: haproxy
       task_stage: install
       tags: ha-install
@@ -168,12 +150,32 @@
         - ha-install
         - apparmor
 
-    - role: geoip_acl
-      tags: geo
-
     - role: docker
       tags:
         - docker
+
+    - role: haproxy-admin
+      task_stage: daemons_env
+      tags:
+        - ha-adm-install
+        - ha-adm-daemons
+        - ha-adm-healthd
+        - ha-adm-controld
+        - ha-adm-backupd
+        - ha-adm-updated
+        - ha-adm-alertd
+        - ha-adm-metricsd
+        - ha-adm-guardd
+
+    - role: haproxy-admin
+      task_stage: native
+      tags: ha-adm-native
+
+    # After the native stage: the GeoIP updater is the native agent, and a
+    # fresh install builds its first release here. The HAProxy configuration
+    # that reads the GeoIP lists is rendered further down.
+    - role: geoip_acl
+      tags: geo
 
     - role: haproxy-admin
       task_stage: getuseruid
@@ -258,17 +260,17 @@
       task_stage: start
       tags: ha-adm-start
 
+    # Last: the former Python daemons go once every unit has been written for
+    # the native binaries, and only the files no installed unit names.
+    - role: haproxy-admin
+      task_stage: native-cleanup
+      tags: ha-adm-native
+
     - role: haproxy-admin
       task_stage: update_haproxy_admin
       tags: 
         - never
         - ha-adm-update
-
-    - role: authelia
-      task_stage: remove
-      tags:
-        - never
-        - aut-remove
 
     - role: authelia
       task_stage: config
@@ -288,18 +290,6 @@
       tags:
         - never
         - aut-update
-
-    - role: authelia
-      task_stage: users_apply
-      tags:
-        - never
-        - aut-users
-
-    - role: haproxy
-      task_stage: addadmin
-      tags:
-        - ha-add-adm-ip
-        - never
 
 - hosts: "{{ easy_ha_proxy_target | default('easy_ha_proxy') }}"
   become: true

@@ -7,7 +7,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
-const APP = path.join(__dirname, "../../docker/app/haproxy_admin");
+const APP = path.join(__dirname, "../../go/panel/web");
 const core = require(path.join(APP, "static/js/request_log_core.js"));
 
 test("a fresh page keeps a plain address", () => {

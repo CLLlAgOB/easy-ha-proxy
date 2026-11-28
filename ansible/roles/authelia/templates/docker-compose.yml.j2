@@ -4,7 +4,7 @@ services:
 {% set container_timezone = authelia_timezone | default('', true) or easy_ha_proxy_host_timezone | default('UTC', true) %}
 {% if authelia_session_redis_enabled | default(true) %}
   authelia-redis:
-    image: {{ authelia_redis_image | default('redis:8.10.3-alpine') }}
+    image: {{ authelia_redis_image | default('redis:8.12.0-alpine') }}
     container_name: authelia-redis
     restart: unless-stopped
     user: "{{ authelia_redis_uid }}:{{ authelia_redis_gid }}"
@@ -14,6 +14,7 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
+    mem_limit: {{ authelia_redis_mem_limit | default('128m') }}
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=32m
     networks:
@@ -44,9 +45,19 @@ services:
     profiles: ["mail-relay"]
 {% endif %}
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - NET_BIND_SERVICE
+      - KILL
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
+    mem_limit: {{ mail_relay_mem_limit | default('128m') }}
     networks:
       - authelia_mail
     volumes:
@@ -78,6 +89,7 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
+    mem_limit: {{ authelia_mem_limit | default('384m') }}
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
     networks:
@@ -90,10 +102,22 @@ services:
       - TZ={{ container_timezone }}
     ports:
       - "127.0.0.1:9091:9091"
-{% if relay_enabled %}
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -x /app/healthcheck.sh ]; then /app/healthcheck.sh; else wget -qO- http://127.0.0.1:9091/api/health >/dev/null 2>&1; fi"]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 15s
+{% if (authelia_session_redis_enabled | default(true)) or relay_enabled %}
     depends_on:
+{% if authelia_session_redis_enabled | default(true) %}
+      authelia-redis:
+        condition: service_healthy
+{% endif %}
+{% if relay_enabled %}
       mail_relay:
         condition: service_healthy
+{% endif %}
 {% endif %}
 
 networks:

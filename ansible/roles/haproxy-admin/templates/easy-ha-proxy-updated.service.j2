@@ -7,12 +7,10 @@ Wants=network-online.target docker.service
 Type=simple
 User=root
 Group={{ app_group | default('hadmin') }}
-Environment="PYTHONUNBUFFERED=1"
 Environment="UPDATED_SOCKET_PATH={{ updated_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-updated.sock') }}"
 Environment="UPDATED_STATE_ROOT={{ updated_state_root | default('/var/lib/easy-ha-proxy/update-web') }}"
 Environment="UPDATED_SOURCE_DIR={{ updated_source_dir | default('/opt/easy-ha-proxy/source') }}"
 Environment="UPDATED_CONFIG_DIR={{ updated_config_dir | default('/etc/easy-ha-proxy') }}"
-Environment="UPDATED_PYTHON_PATH={{ updated_python_path | default('/opt/easy-ha-proxy/venv/bin/python') }}"
 Environment="UPDATED_CLI_PATH={{ updated_cli_path | default('/usr/local/bin/easy-ha-proxy') }}"
 Environment="UPDATED_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
 Environment="UPDATED_APP_GROUP={{ app_group | default('hadmin') }}"
@@ -36,9 +34,8 @@ Environment="UPDATED_SERVICE_NAME=easy-ha-proxy-updated.service"
 # Reporting to the alert engine is optional and best effort; without
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
-Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-updated.py', rstrip=false) | hash('sha256') }}"
-ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-updated.py
+EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} updated
 Restart=always
 RestartSec=3
 TimeoutStopSec={{ (updated_job_timeout_seconds | default(7200) | int) + 30 }}

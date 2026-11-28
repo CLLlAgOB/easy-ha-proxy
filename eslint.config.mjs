@@ -7,7 +7,7 @@
 import js from "@eslint/js";
 import globals from "globals";
 
-const PANEL = "docker/app/haproxy_admin/static/js";
+const PANEL = "go/panel/web/static/js";
 
 export default [
   {

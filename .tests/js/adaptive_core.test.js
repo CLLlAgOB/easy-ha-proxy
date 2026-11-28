@@ -9,7 +9,7 @@ const path = require("node:path");
 
 const {russianCatalogue, recordingLabel} = require("./catalogue.js");
 
-const core = require(path.join(__dirname, "../../docker/app/haproxy_admin/static/js/adaptive_core.js"));
+const core = require(path.join(__dirname, "../../go/panel/web/static/js/adaptive_core.js"));
 
 const MINUTE = 60;
 const HOUR = 3600;

@@ -1,0 +1,29 @@
+[package]
+name = "guardd-core"
+version = "0.1.0"
+edition = "2021"
+description = "High-throughput Rust log parsing, signature matching, and bounded IP/subnet tracking core for easy-ha-proxy-guardd"
+license = "GPL-3.0-only"
+
+[lib]
+name = "guardd_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "guardd-core"
+path = "src/main.rs"
+
+[dependencies]
+aho-corasick = "1.1"
+hashlink = "0.12"
+libc = "0.2"
+memchr = "2.7"
+regex = "1.11"
+rusqlite = { version = "0.43", default-features = false, features = ["bundled", "cache", "hooks"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

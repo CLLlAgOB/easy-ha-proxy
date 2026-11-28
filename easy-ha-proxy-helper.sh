@@ -3,8 +3,6 @@ set -Eeuo pipefail
 
 product="easy-ha-proxy"
 helper_version="2026.07.19-web-updates1"
-branch="${EASY_HA_PROXY_BRANCH:-main}"
-raw_base="${EASY_HA_PROXY_RAW_BASE:-https://raw.githubusercontent.com/CLLlAgOB/easy-ha-proxy/${branch}}"
 install_home="${EASY_HA_PROXY_HOME:-/opt/easy-ha-proxy}"
 config_dir="${EASY_HA_PROXY_CONFIG_DIR:-/etc/easy-ha-proxy}"
 reboot_schedule_marker="/run/easy-ha-proxy/reboot-scheduled"
@@ -222,21 +220,53 @@ if [[ "${EUID}" -ne 0 ]]; then
       sudo_arguments+=(--image-channel "${image_channel}")
     [[ -n "${new_domain}" ]] && sudo_arguments+=(--new-domain "${new_domain}")
     [[ "${plan_only}" == true ]] && sudo_arguments+=(--plan-only)
-    exec sudo \
-      env \
-        EASY_HA_PROXY_HOME="${install_home}" \
-        EASY_HA_PROXY_CONFIG_DIR="${config_dir}" \
-        EASY_HA_PROXY_BRANCH="${branch}" \
-        EASY_HA_PROXY_RAW_BASE="${raw_base}" \
-        EASY_HA_PROXY_LOCAL_INSTALLER="${local_installer}" \
-        EASY_HA_PROXY_LANGUAGE="${language}" \
-        "${sudo_arguments[@]}"
+    sudo_environment=(
+      EASY_HA_PROXY_HOME="${install_home}"
+      EASY_HA_PROXY_CONFIG_DIR="${config_dir}"
+      EASY_HA_PROXY_LOCAL_INSTALLER="${local_installer}"
+      EASY_HA_PROXY_LANGUAGE="${language}"
+    )
+    # Pass the branch only when it was given: root reads the recorded one,
+    # which this user may not be allowed to read.
+    [[ -n "${EASY_HA_PROXY_BRANCH:-}" ]] &&
+      sudo_environment+=(EASY_HA_PROXY_BRANCH="${EASY_HA_PROXY_BRANCH}")
+    [[ -n "${EASY_HA_PROXY_RAW_BASE:-}" ]] &&
+      sudo_environment+=(EASY_HA_PROXY_RAW_BASE="${EASY_HA_PROXY_RAW_BASE}")
+    exec sudo env "${sudo_environment[@]}" "${sudo_arguments[@]}"
   fi
 fi
 
+# The branch this gateway follows, which checks compare with and updates
+# fetch: an explicit EASY_HA_PROXY_BRANCH, else the branch the installer
+# recorded in metadata.yml (the alpha channel records alpha), else main.
+# easy-ha-proxy-helper.sh and install-local.sh resolve it the same way.
+gateway_branch() {
+  local recorded=""
+  if [[ -n "${EASY_HA_PROXY_BRANCH:-}" ]]; then
+    printf '%s\n' "${EASY_HA_PROXY_BRANCH}"
+    return
+  fi
+  if [[ -r "${config_dir}/metadata.yml" ]]; then
+    recorded="$(
+      awk -F':[[:space:]]*' '$1 == "branch" {gsub(/["\047[:space:]]/, "", $2); print $2; exit}' \
+        "${config_dir}/metadata.yml" 2>/dev/null || true
+    )"
+  fi
+  # Only a plain branch name is taken from the file.
+  if [[ "${recorded}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ &&
+        "${recorded}" != *..* && "${recorded}" != *//* &&
+        "${recorded}" != */ && "${recorded}" != *.lock ]]; then
+    printf '%s\n' "${recorded}"
+  else
+    printf 'main\n'
+  fi
+}
+branch="$(gateway_branch)"
+raw_base="${EASY_HA_PROXY_RAW_BASE:-https://raw.githubusercontent.com/CLLlAgOB/easy-ha-proxy/${branch}}"
+
 metadata_file="${config_dir}/metadata.yml"
 source_dir="${install_home}/source"
-venv_python="${install_home}/venv/bin/python"
+agent_bin="${EASY_HA_PROXY_AGENT_BIN:-/usr/local/sbin/easy-ha-proxy-agent}"
 playbook_file="${source_dir}/ansible/easy-ha-proxy.yml"
 legacy_haproxy_config="${EASY_HA_PROXY_LEGACY_HAPROXY_CONFIG:-/etc/haproxy/haproxy.cfg}"
 legacy_authelia_compose="${EASY_HA_PROXY_LEGACY_AUTHELIA_COMPOSE:-/opt/authelia/docker-compose.yml}"
@@ -248,6 +278,9 @@ daemon_units=(
   haproxy-healthd.service
   easy-ha-proxy-backupd.service
   easy-ha-proxy-updated.service
+  easy-ha-proxy-alertd.service
+  easy-ha-proxy-guardd.service
+  easy-ha-proxy-metricsd.service
   authelia-configd.service
   authelia-usersd.service
   authelia-bansd.service
@@ -258,29 +291,31 @@ daemon_labels=(
   "HAProxy health daemon"
   "Full backup and restore daemon"
   "Software update broker"
+  "Alerting daemon"
+  "Adaptive protection daemon"
+  "Metrics collector daemon"
   "Authelia config daemon"
   "Authelia users daemon"
   "Authelia bans daemon"
 )
-daemon_scripts=(
-  /usr/local/sbin/haproxy-certd.py
-  /usr/local/sbin/haproxy-controld.py
-  /usr/local/sbin/haproxy-healthd.py
-  /usr/local/sbin/easy-ha-proxy-backupd.py
-  /usr/local/sbin/easy-ha-proxy-updated.py
-  /usr/local/sbin/authelia-configd.py
-  /usr/local/sbin/authelia-usersd.py
-  /usr/local/sbin/authelia-bansd.py
-)
-daemon_sources=(
-  ansible/roles/haproxy-admin/files/haproxy-certd.py
-  ansible/roles/haproxy-admin/files/haproxy-controld.py
-  ansible/roles/haproxy-admin/files/haproxy-healthd.py
-  ansible/roles/haproxy-admin/files/easy-ha-proxy-backupd.py
-  ansible/roles/haproxy-admin/files/easy-ha-proxy-updated.py
-  ansible/roles/authelia/files/authelia-configd.py
-  ansible/roles/authelia/files/authelia-usersd.py
-  ansible/roles/authelia/files/authelia-bansd.py
+# The binary each unit runs: every daemon is a mode of the native agent,
+# except adaptive protection, which is guardd-core. The native stage records
+# the commit they were built from.
+native_agent_bin=/usr/local/sbin/easy-ha-proxy-agent
+native_guardd_bin=/usr/local/sbin/guardd-core
+native_metadata=/var/lib/easy-ha-proxy/native-staging/image.json
+daemon_binaries=(
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_guardd_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
+  "${native_agent_bin}"
 )
 managed_unit_units=(
   iptables-haproxy-ban.service
@@ -364,7 +399,7 @@ installation_state="clean"
 control_plane_ready=false
 if [[ -n "${cli_path}" &&
       -f "${metadata_file}" &&
-      -x "${venv_python}" &&
+      -x "${agent_bin}" &&
       -f "${playbook_file}" ]]; then
   control_plane_ready=true
 fi
@@ -461,35 +496,19 @@ mode_label() {
 print_service_line() {
   local unit="$1"
   local label="$2"
-  local script="${3:-}"
-  local source_relative="${4:-}"
+  local binary="${3:-}"
   local state="not-installed"
-  local installed_version=""
-  local source_version=""
   local version_text=""
   if command -v systemctl >/dev/null 2>&1 &&
      systemctl cat "${unit}" >/dev/null 2>&1; then
     state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
     [[ -n "${state}" ]] || state="unknown"
   fi
-  if [[ -n "${script}" && -f "${script}" ]] &&
+  if [[ -n "${binary}" && -f "${binary}" ]] &&
      command -v sha256sum >/dev/null 2>&1; then
-    installed_version="$(
-      sha256sum "${script}" | awk '{ print substr($1, 1, 12) }'
+    version_text=" | ${binary##*/} $(
+      sha256sum "${binary}" | awk '{ print substr($1, 1, 12) }'
     )"
-    version_text=" | version=${installed_version}"
-    if [[ -n "${source_relative}" &&
-          -f "${source_dir}/${source_relative}" ]]; then
-      source_version="$(
-        sha256sum "${source_dir}/${source_relative}" |
-          awk '{ print substr($1, 1, 12) }'
-      )"
-      if [[ "${installed_version}" == "${source_version}" ]]; then
-        version_text+=" (current)"
-      else
-        version_text+=" -> ${source_version} (update available)"
-      fi
-    fi
   fi
   printf '  %-30s %-13s%s\n' "${label}:" "${state}" "${version_text}"
 }
@@ -535,8 +554,7 @@ inspect_system() {
     print_service_line \
       "${daemon_units[i]}" \
       "${daemon_labels[i]}" \
-      "${daemon_scripts[i]}" \
-      "${daemon_sources[i]}"
+      "${daemon_binaries[i]}"
   done
   for i in "${!managed_unit_units[@]}"; do
     print_service_line \
@@ -623,7 +641,7 @@ ensure_local_installer() {
     die "$(message 'install-local.sh was not found and curl is unavailable for downloading it.' 'install-local.sh не найден, а curl для его загрузки недоступен.')"
   temporary_installer="$(mktemp -t easy-ha-proxy-install-local.XXXXXX.sh)"
   log "$(message 'Downloading the local installer' 'Загружаю локальный установщик')"
-  curl -fsSL "${raw_base}/install-local.sh" -o "${temporary_installer}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 180 "${raw_base}/install-local.sh" -o "${temporary_installer}"
   chmod 0700 "${temporary_installer}"
   local_installer="${temporary_installer}"
 }
@@ -661,7 +679,7 @@ run_install() {
       'Refreshing the managed source from GitHub before continuing' \
       'Обновляю управляемые исходники из GitHub перед продолжением')"
     bash "${local_installer}" "${arguments[@]}" || status=$?
-  elif [[ -f "${source_dir}/installer/easy_ha_proxy.py" &&
+  elif [[ -f "${source_dir}/installer/easy-ha-proxy" &&
           -f "${source_dir}/ansible/easy-ha-proxy.yml" ]]; then
     log "$(message \
       'Continuing with the source already prepared on this server' \
@@ -697,7 +715,7 @@ choose_deployment_channels() {
     current_source="$(yaml_scalar source_channel "${metadata_file}")"
     [[ "${current_source}" == local ]] || current_source="github"
     printf '\n%s\n' "$(message 'Source code for this update:' 'Исходный код для этого обновления:')"
-    printf '  1) GitHub main\n'
+    printf '  1) GitHub %s\n' "${branch}"
     printf '  2) %s\n' "$(message 'Already synchronized local source' 'Уже синхронизированные локальные исходники')"
     choice="$(read_menu_choice "$(message 'Choose source' 'Выберите источник')")"
     if [[ -z "${choice}" ]]; then
@@ -782,24 +800,22 @@ check_configs() {
       check_file "${config_dir}/${file}" "${file}" || ((failures += 1))
     done
     check_file "${playbook_file}" "Ansible playbook" || ((failures += 1))
-    if [[ -x "${venv_python}" ]]; then
-      printf '[ OK ] Python venv: %s\n' "${venv_python}"
-      if "${venv_python}" -c \
-        'import pathlib, sys, yaml; [yaml.safe_load(pathlib.Path(p).read_text()) for p in sys.argv[1:]]' \
-        "${config_dir}/metadata.yml" \
-        "${config_dir}/vars.yml" \
-        "${config_dir}/secrets.yml" \
-        "${config_dir}/authelia.yml" \
-        "${config_dir}/authelia_users_initial.yml" \
-        "${config_dir}/websites.yml" \
-        "${config_dir}/tcp.yml"; then
+    if [[ -x "${agent_bin}" ]]; then
+      printf '[ OK ] Host agent: %s\n' "${agent_bin}"
+      # The agent reads every managed YAML file the way the installer does;
+      # an empty name list prints nothing and only checks that they load.
+      names_file="$(mktemp)"
+      printf '[]' > "${names_file}"
+      if "${agent_bin}" apply vars --source "${source_dir}" --config "${config_dir}" \
+          --names "${names_file}" >/dev/null; then
         printf '[ OK ] %s\n' "$(message 'YAML files have valid syntax' 'YAML-файлы читаются без синтаксических ошибок')"
       else
         printf '[FAIL] %s\n' "$(message 'One or more YAML files are invalid' 'Один или несколько YAML-файлов повреждены')"
         ((failures += 1))
       fi
+      rm -f "${names_file}"
     else
-      printf '[FAIL] Python venv: %s\n' "${venv_python}"
+      printf '[FAIL] Host agent: %s\n' "${agent_bin}"
       ((failures += 1))
     fi
   fi
@@ -864,7 +880,7 @@ show_migration_plan() {
    /etc/easy-ha-proxy/secrets.yml с правами 0600.
 4. Сохранить текущую /opt/authelia/users_database.yml: режим selfservice не
    должен перезаписывать живую базу пользователей.
-5. Установить только управляющий source/venv и сформировать конфигурацию,
+5. Установить только управляющий source и агент и сформировать конфигурацию,
    ничего не применяя к сервисам.
 6. Выполнить syntax-check и Ansible check mode, сохранить diff и проверить его.
 7. Сначала применить безопасные точечные теги, затем — остальной стек.
@@ -1147,16 +1163,17 @@ source_update_state() {
   origin="${EASY_HA_PROXY_REPOSITORY:-$(yaml_scalar repository "${metadata_file}")}"
   origin="${origin:-https://github.com/CLLlAgOB/easy-ha-proxy.git}"
   installed_fingerprint="$(source_fingerprint "${source_dir}" 2>/dev/null || true)"
-  temporary_update_checkout="$(mktemp -d -t easy-ha-proxy-update-check.XXXXXX)"
+  local tmp_checkout=""
+  tmp_checkout="$(mktemp -d -t easy-ha-proxy-update-check.XXXXXX)"
   if command -v git >/dev/null 2>&1 &&
      GIT_TERMINAL_PROMPT=0 git clone --quiet --depth=1 --branch "${branch}" \
-       "${origin}" "${temporary_update_checkout}/source" 2>/dev/null; then
+       "${origin}" "${tmp_checkout}/source" 2>/dev/null; then
     remote_revision="$(
-      git -C "${temporary_update_checkout}/source" rev-parse HEAD 2>/dev/null ||
+      git -C "${tmp_checkout}/source" rev-parse HEAD 2>/dev/null ||
         true
     )"
     remote_fingerprint="$(
-      source_fingerprint "${temporary_update_checkout}/source" 2>/dev/null ||
+      source_fingerprint "${tmp_checkout}/source" 2>/dev/null ||
         true
     )"
     if [[ -n "${installed_fingerprint}" &&
@@ -1173,6 +1190,7 @@ source_update_state() {
     printf 'unknown|%s||не удалось скачать source для сравнения\n' \
       "${installed_fingerprint}"
   fi
+  rm -rf "${tmp_checkout}"
 }
 
 ensure_remote_source_snapshot() {
@@ -1204,77 +1222,115 @@ ensure_remote_source_snapshot() {
   remote_source_snapshot="${temporary_update_checkout}/source"
 }
 
+# The commit the native binaries were built from; empty when unknown.
+native_installed_revision() {
+  [[ -r "${native_metadata}" ]] || return 0
+  sed -n 's/.*"revision"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' \
+    "${native_metadata}" 2>/dev/null | head -n 1
+}
+
+source_revision_of() {
+  local source="$1" revision=""
+  if [[ -e "${source}/.git" ]]; then
+    revision="$(git -c "safe.directory=${source}" -C "${source}" rev-parse HEAD 2>/dev/null || true)"
+  fi
+  if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ && -r "${source}/.easy-ha-proxy-source-revision" ]]; then
+    revision="$(awk -F= '$1 == "revision" {print $2; exit}' "${source}/.easy-ha-proxy-source-revision" | tr -d '[:space:]')"
+  fi
+  if [[ "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s\n' "${revision}"
+  fi
+}
+
+# The native binaries are pinned to the commit they were built from, so they
+# are due whenever the source to compare with is another commit -- what the
+# daemons component of `easy-ha-proxy update` installs.
+# A configuration switch as the playbook reads it: vars.yml, then authelia.yml,
+# the later file's value winning, as in its vars_files.
+config_switch() {
+  local name="$1"
+  local value=""
+  local found=""
+  local file=""
+
+  for file in "${config_dir}/vars.yml" "${config_dir}/authelia.yml"; do
+    [[ -r "${file}" ]] || continue
+    found="$(yaml_scalar "${name}" "${file}")"
+    [[ -n "${found}" ]] && value="${found}"
+  done
+  printf '%s\n' "${value,,}"
+}
+
+# Authelia's daemons are installed only where Authelia (and that daemon) is
+# switched on; a missing one is then no sign of a pending update.
+unit_expected() {
+  case "$1" in
+    authelia-*) [[ "$(config_switch authelia_enabled)" == true ]] || return 1 ;;
+  esac
+  case "$1" in
+    authelia-bansd.service) [[ "$(config_switch authelia_bans_daemon_enabled)" != false ]] ;;
+    authelia-configd.service) [[ "$(config_switch authelia_configd_enabled)" != false ]] ;;
+    *) return 0 ;;
+  esac
+}
+
 daemon_updates_available() {
   local comparison_root="${1:-${source_dir}}"
-  local installed=""
-  local source=""
+  local wanted=""
   local i=""
 
-  command -v sha256sum >/dev/null 2>&1 || return 1
   for i in "${!daemon_units[@]}"; do
-    [[ -f "${comparison_root}/${daemon_sources[i]}" ]] || continue
     if command -v systemctl >/dev/null 2>&1 &&
        ! systemctl cat "${daemon_units[i]}" >/dev/null 2>&1; then
+      unit_expected "${daemon_units[i]}" || continue
       return 0
     fi
-    if [[ ! -f "${daemon_scripts[i]}" ]]; then
-      return 0
-    fi
-    installed="$(sha256sum "${daemon_scripts[i]}" | awk '{ print $1 }')"
-    source="$(
-      sha256sum "${comparison_root}/${daemon_sources[i]}" | awk '{ print $1 }'
-    )"
-    [[ "${installed}" == "${source}" ]] || return 0
+    [[ -x "${daemon_binaries[i]}" ]] || return 0
   done
-  return 1
+  wanted="$(source_revision_of "${comparison_root}")"
+  [[ -n "${wanted}" && "$(native_installed_revision)" != "${wanted}" ]]
 }
 
 show_daemon_versions() {
   local comparison_root="${1:-${source_dir}}"
   local comparison_label="${2:-current source}"
   local installed=""
-  local source=""
+  local wanted=""
   local state=""
+  local tag=""
   local i=""
 
-  printf '\nВспомогательные systemd-демоны (сравнение: %s; версия = SHA-256):\n' \
+  installed="$(native_installed_revision)"
+  wanted="$(source_revision_of "${comparison_root}")"
+  printf '\nВспомогательные systemd-демоны (нативная сборка; сравнение: %s):\n' \
     "${comparison_label}"
-  if ! command -v sha256sum >/dev/null 2>&1; then
-    printf '[WARN] sha256sum недоступен, версии демонов не проверены.\n'
-    return
+  if [[ -z "${installed}" ]]; then
+    printf '[WARN] Ревизия нативной сборки неизвестна (%s).\n' "${native_metadata}"
+  elif [[ -z "${wanted}" ]]; then
+    printf '[INFO] Нативная сборка %s; ревизию для сравнения определить не удалось.\n' \
+      "${installed:0:12}"
+  elif [[ "${installed}" == "${wanted}" ]]; then
+    printf '[ OK ] Нативная сборка %s совпадает с исходниками.\n' "${installed:0:12}"
+  else
+    printf '[UPD ] Нативная сборка %s -> %s\n' "${installed:0:12}" "${wanted:0:12}"
   fi
   for i in "${!daemon_units[@]}"; do
-    state="not-installed"
-    if command -v systemctl >/dev/null 2>&1 &&
-       systemctl cat "${daemon_units[i]}" >/dev/null 2>&1; then
-      state="$(systemctl is-active "${daemon_units[i]}" 2>/dev/null || true)"
-      state="${state:-unknown}"
-    else
+    if ! command -v systemctl >/dev/null 2>&1 ||
+       ! systemctl cat "${daemon_units[i]}" >/dev/null 2>&1; then
       printf '[INFO] %-27s не установлен\n' "${daemon_units[i]}"
       continue
     fi
-    if [[ ! -f "${daemon_scripts[i]}" ]]; then
-      printf '[MISS] %-27s state=%s, скрипт отсутствует\n' \
-        "${daemon_units[i]}" "${state}"
+    state="$(systemctl is-active "${daemon_units[i]}" 2>/dev/null || true)"
+    state="${state:-unknown}"
+    if [[ ! -x "${daemon_binaries[i]}" ]]; then
+      printf '[MISS] %-27s state=%s, нет %s\n' \
+        "${daemon_units[i]}" "${state}" "${daemon_binaries[i]}"
       continue
     fi
-    installed="$(sha256sum "${daemon_scripts[i]}" | awk '{ print $1 }')"
-    if [[ ! -f "${comparison_root}/${daemon_sources[i]}" ]]; then
-      printf '[WARN] %-27s state=%s, installed=%s, source отсутствует\n' \
-        "${daemon_units[i]}" "${state}" "${installed:0:12}"
-      continue
-    fi
-    source="$(
-      sha256sum "${comparison_root}/${daemon_sources[i]}" | awk '{ print $1 }'
-    )"
-    if [[ "${installed}" == "${source}" ]]; then
-      printf '[ OK ] %-27s state=%s, version=%s\n' \
-        "${daemon_units[i]}" "${state}" "${installed:0:12}"
-    else
-      printf '[UPD ] %-27s state=%s, %s -> %s\n' \
-        "${daemon_units[i]}" "${state}" \
-        "${installed:0:12}" "${source:0:12}"
-    fi
+    tag='[ OK ]'
+    [[ "${state}" == "active" ]] || tag='[WARN]'
+    printf '%s %-27s state=%s, %s\n' \
+      "${tag}" "${daemon_units[i]}" "${state}" "${daemon_binaries[i]##*/}"
   done
 }
 
@@ -1418,6 +1474,7 @@ prompt_update_selection() {
   local max="$1"
   local answer=""
   local token=""
+  local -a tokens=()
   local -A seen=()
 
   selected_update_indexes=()
@@ -1440,7 +1497,8 @@ prompt_update_selection() {
       ;;
   esac
 
-  for token in ${answer}; do
+  read -r -a tokens <<<"${answer}"
+  for token in "${tokens[@]}"; do
     if [[ ! "${token}" =~ ^[0-9]+$ ||
           "${token}" -lt 1 ||
           "${token}" -gt "${max}" ]]; then
@@ -2308,9 +2366,13 @@ EOF
       12) perform_action migrate-domain ;;
       13) perform_action backup-full ;;
       14)
-        [[ "${configuration_mode}" == "test" ]] &&
-          perform_action test-info ||
-          [[ "${language}" == "ru" ]] && printf 'Неизвестный пункт.\n' || printf 'Unknown menu item.\n'
+        if [[ "${configuration_mode}" == "test" ]]; then
+          perform_action test-info
+        elif [[ "${language}" == "ru" ]]; then
+          printf 'Неизвестный пункт.\n'
+        else
+          printf 'Unknown menu item.\n'
+        fi
         ;;
       0) return ;;
       *) [[ "${language}" == "ru" ]] && printf 'Неизвестный пункт.\n' || printf 'Unknown menu item.\n' ;;

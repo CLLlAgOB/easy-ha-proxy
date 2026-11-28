@@ -12,11 +12,26 @@ set -eu
 SOCKET="{{ haproxy_socket | default('/run/haproxy/admin.sock') }}"
 STATE_FILE="{{ haproxy_server_state_file | default('/var/lib/haproxy/server-state') }}"
 CONFIG_FILE="${1:-/etc/haproxy/haproxy.cfg}"
-NORMALIZER="${2:-/usr/local/libexec/easy-ha-proxy/haproxy-server-state.py}"
+NORMALIZER="${2:-}"
+# The installer agent normalizes the dump; an agent named as the second
+# argument is used instead (the tests drive the script with the one they
+# built). Without an agent -- on a fresh install HAProxy starts before the
+# native stage has put it in place -- the last valid state file is kept.
+AGENT="{{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }}"
 TMP_FILE="${STATE_FILE}.tmp.$$"
 FILTERED_FILE="${TMP_FILE}.config-transport"
 
 trap 'rm -f "$TMP_FILE" "$FILTERED_FILE"' EXIT INT TERM
+
+normalize() {
+    if [ -n "$NORMALIZER" ]; then
+        "$NORMALIZER" server-state --config "$CONFIG_FILE" --state "$1"
+    elif [ -x "$AGENT" ]; then
+        "$AGENT" server-state --config "$CONFIG_FILE" --state "$1"
+    else
+        return 1
+    fi
+}
 
 if [ ! -S "$SOCKET" ]; then
     # Also clean a pre-upgrade file before starting a stopped HAProxy.
@@ -39,11 +54,11 @@ fi
 # Reuse the same rules as package migration and rollback. Only administrative
 # controls and applicable health/DNS cache survive; configuration wins for
 # addressing, TLS and check transport. Never replace a valid dump on failure.
-if ! python3 "$NORMALIZER" --config "$CONFIG_FILE" --state "$TMP_FILE" > "$FILTERED_FILE"; then
+if ! normalize "$TMP_FILE" > "$FILTERED_FILE"; then
     # A successful socket connection can still return an error or a truncated
     # dump. Reconcile the last valid snapshot too, rather than restoring its
     # old ports/DNS merely because the current runtime API is unavailable.
-    if [ ! -s "$STATE_FILE" ] || ! python3 "$NORMALIZER" --config "$CONFIG_FILE" --state "$STATE_FILE" > "$FILTERED_FILE"; then
+    if [ ! -s "$STATE_FILE" ] || ! normalize "$STATE_FILE" > "$FILTERED_FILE"; then
         exit 0
     fi
 fi

@@ -6,7 +6,6 @@ product="easy-ha-proxy"
 branch="${EASY_HA_PROXY_BRANCH:-main}"
 raw_base="${EASY_HA_PROXY_RAW_BASE:-https://raw.githubusercontent.com/CLLlAgOB/easy-ha-proxy/${branch}}"
 temporary_components=()
-temporary_directories=()
 component=""
 inventory_candidates=()
 input_fd=0
@@ -30,10 +29,7 @@ Usage:
   install.sh remote [options]       Manage/install a machine over SSH
   install.sh ACTION                 Run a local maintenance action
   install.sh prepare-legacy [LIVE]  Build a local config from a legacy snapshot
-  install.sh plan-legacy [CONFIG]   Check prepared config against the server
-  install.sh diff-legacy-haproxy    Show the protected HAProxy config diff
   install.sh stage-legacy [CONFIG]  Stage the new control plane without apply
-  install.sh finalize-legacy        Sync the safe UI template and verify status
   install.sh sync-source [INVENTORY] Upload local source without applying it
   install.sh backup-full [INVENTORY] Create/download encrypted full backup
   install.sh restore-full BACKUP [INVENTORY] [HOST] [MODE]
@@ -44,9 +40,8 @@ Local actions:
   apply-current, update-ui, update-containers, configure, migrate-domain,
   promote-production, repair,
   install, install-test, install-reset, install-test-reset,
-  test-info, backup-full, snapshot-legacy, migration-plan, prepare-legacy, plan-legacy,
-  diff-legacy-haproxy,
-  stage-legacy, finalize-legacy, sync-source
+  test-info, backup-full, snapshot-legacy, migration-plan, prepare-legacy,
+  stage-legacy, sync-source
 
 Examples:
   ./install.sh
@@ -74,9 +69,6 @@ cleanup() {
   for path in "${temporary_components[@]}"; do
     rm -f "${path}"
   done
-  for path in "${temporary_directories[@]}"; do
-    rm -rf -- "${path}"
-  done
 }
 trap cleanup EXIT
 
@@ -102,7 +94,7 @@ component_path() {
   temporary="$(mktemp -t "easy-ha-proxy-${safe_name}.XXXXXX")"
   temporary_components+=("${temporary}")
   printf '[%s] Downloading %s\n' "${product}" "${name}" >&2
-  curl -fsSL "${raw_base}/${name}" -o "${temporary}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 180 "${raw_base}/${name}" -o "${temporary}"
   chmod 0700 "${temporary}"
   component="${temporary}"
 }
@@ -130,183 +122,25 @@ prepare_legacy_config() {
   source_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
   controller_dir="${EASY_HA_PROXY_CONTROLLER_DIR:-$(cd -- "$(dirname -- "${source_path}")" && pwd)}"
   [[ -f "${controller_dir}/ansible/authelia.yml" ]] ||
-    die "Controller Ansible files not found under ${controller_dir}."
+    die "Controller source files not found under ${controller_dir}."
 
   output_dir="$(dirname -- "${live_dir}")/prepared-config"
-  component_path installer/prepare_legacy_config.py
-  preparer="${component}"
-  command -v python3 >/dev/null 2>&1 || die "python3 is required."
-  python3 "${preparer}" \
+  # The host agent converts the snapshot. A controlling machine without one
+  # uses the agent built for this source, fetched into a scratch directory.
+  preparer=/usr/local/sbin/easy-ha-proxy-agent
+  if ! { [[ -x "${preparer}" ]] && "${preparer}" prepare-legacy-config --help >/dev/null 2>&1; }; then
+    [[ -f "${controller_dir}/installer/agent-fetch.sh" ]] ||
+      die "Controller source files not found under ${controller_dir}."
+    # shellcheck source=installer/agent-fetch.sh
+    source "${controller_dir}/installer/agent-fetch.sh"
+    preparer="$(mktemp -d)/easy-ha-proxy-agent"
+    easy_ha_proxy_fetch_agent "${controller_dir}" "${preparer}" ||
+      die "The host agent could not be fetched."
+  fi
+  "${preparer}" prepare-legacy-config \
     --live-dir "${live_dir}" \
     --controller-dir "${controller_dir}" \
     --output-dir "${output_dir}"
-}
-
-plan_legacy_config() {
-  local backup_root="${EASY_HA_PROXY_BACKUP_DIR:-${HOME:-${PWD}}/easy-ha-proxy-backups}"
-  local prepared_dir="${1:-}"
-  local inventory="${2:-}"
-  local plan_mode="${3:-full}"
-  local controller_dir=""
-  local source_path=""
-  local log_file=""
-  local timestamp=""
-  local status=0
-  local answer=""
-  local -a command=()
-  local -a pipeline_status=()
-  local update_tags=""
-  local ansible_temp=""
-
-  if [[ -z "${prepared_dir}" ]]; then
-    prepared_dir="$(
-      find "${backup_root}" \
-        -mindepth 2 -maxdepth 2 -type d -name prepared-config \
-        -printf '%T@ %p\n' 2>/dev/null |
-        sort -nr |
-        awk 'NR == 1 {$1=""; sub(/^ /, ""); print}'
-    )"
-  fi
-  [[ -n "${prepared_dir}" && -d "${prepared_dir}" ]] ||
-    die "Prepared legacy configuration not found."
-  for required in \
-    vars.yml \
-    authelia.yml \
-    authelia_users_initial.yml \
-    websites.yml \
-    tcp.yml \
-    secrets.yml \
-    metadata.yml; do
-    [[ -f "${prepared_dir}/${required}" ]] ||
-      die "Prepared configuration is incomplete: ${required}"
-  done
-
-  source_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-  controller_dir="${EASY_HA_PROXY_CONTROLLER_DIR:-$(cd -- "$(dirname -- "${source_path}")" && pwd)}"
-  [[ -f "${controller_dir}/ansible/easy-ha-proxy.yml" ]] ||
-    die "Controller playbook not found under ${controller_dir}."
-
-  if [[ -z "${inventory}" ]]; then
-    discover_inventory_files
-    [[ "${#inventory_candidates[@]}" -gt 0 ]] ||
-      die "Remote inventory.ini not found."
-    inventory="${inventory_candidates[0]}"
-  fi
-  [[ -r "${inventory}" ]] || die "Cannot read inventory: ${inventory}"
-  command -v ansible-playbook >/dev/null 2>&1 ||
-    die "ansible-playbook is required on the controller."
-
-  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  if [[ "${plan_mode}" == "haproxy-diff" ]]; then
-    log_file="$(dirname -- "${prepared_dir}")/legacy-haproxy-diff-${timestamp}.log"
-    update_tags="ha-cfg"
-  elif [[ "${plan_mode}" == "finalize" ]]; then
-    log_file="$(dirname -- "${prepared_dir}")/legacy-finalize-${timestamp}.log"
-    update_tags="ha-adm-cfg,status"
-  else
-    log_file="$(dirname -- "${prepared_dir}")/legacy-plan-${timestamp}.log"
-    update_tags="crt-hooks,crt-notify,ha-install,apparmor,geo,ha-cfg,docker,aut-install,"
-    update_tags+="ha-adm-install,ha-adm-healthd,ha-adm-cfg,ha-adm-controld,"
-    update_tags+="ha-adm-journald,ha-adm-update,ha-adm-start,status"
-  fi
-
-  command=(
-    ansible-playbook
-    -i "${inventory}"
-    "${controller_dir}/ansible/easy-ha-proxy.yml"
-    --extra-vars "easy_ha_proxy_config_dir=${prepared_dir}"
-    --extra-vars "easy_ha_proxy_target=easy_ha_proxy"
-    --tags "${update_tags}"
-  )
-
-  printf 'Prepared config: %s\n' "${prepared_dir}"
-  printf 'Remote inventory: %s\n' "${inventory}"
-  printf 'Plan log: %s\n' "${log_file}"
-  if [[ "${plan_mode}" == "haproxy-diff" ]]; then
-    if [[ "${language}" == "ru" ]]; then
-      answer="$(read_tty "Показать защищённый HAProxy diff через check mode? [y/N]: ")"
-    else
-      answer="$(read_tty "Show the protected HAProxy diff using check mode? [y/N]: ")"
-    fi
-  elif [[ "${plan_mode}" == "finalize" ]]; then
-    if [[ "${language}" == "ru" ]]; then
-      answer="$(read_tty "Введите APPLY для синхронизации UI-шаблона: ")"
-    else
-      answer="$(read_tty "Enter APPLY to synchronize the UI template: ")"
-    fi
-  else
-    if [[ "${language}" == "ru" ]]; then
-      answer="$(read_tty "Запустить syntax-check и удалённый Ansible check mode? [y/N]: ")"
-    else
-      answer="$(read_tty "Run syntax-check and remote Ansible check mode? [y/N]: ")"
-    fi
-  fi
-  if [[ "${plan_mode}" == "finalize" ]]; then
-    [[ "${answer}" == "APPLY" ]] || {
-      [[ "${language}" == "ru" ]] && printf 'Действие отменено.\n' || printf 'Action cancelled.\n'
-      return
-    }
-  else
-    case "${answer,,}" in
-      y|yes|д|да) ;;
-      *)
-        [[ "${language}" == "ru" ]] && printf 'Действие отменено.\n' || printf 'Action cancelled.\n'
-        return
-        ;;
-    esac
-  fi
-
-  # Ansible's local working directory, private to this run. A fixed name in
-  # /tmp belonged to whichever user created it first, and Ansible writes the
-  # modules it is about to run there.
-  ansible_temp="$(mktemp -d -t easy-ha-proxy-ansible.XXXXXX)"
-  temporary_directories+=("${ansible_temp}")
-
-  set +e
-  {
-    printf '=== syntax-check ===\n'
-    ANSIBLE_CONFIG="${controller_dir}/ansible/ansible.cfg" \
-    ANSIBLE_VARS_ENABLED='' \
-    ANSIBLE_LOCAL_TEMP="${ansible_temp}" \
-      "${command[@]}" --syntax-check
-    if [[ "${plan_mode}" == "finalize" ]]; then
-      printf '\n=== targeted apply (ha-adm-cfg,status) ===\n'
-    else
-      printf '\n=== check mode ===\n'
-    fi
-    if [[ "${plan_mode}" == "haproxy-diff" ]]; then
-      ANSIBLE_CONFIG="${controller_dir}/ansible/ansible.cfg" \
-      ANSIBLE_VARS_ENABLED='' \
-      ANSIBLE_LOCAL_TEMP="${ansible_temp}" \
-        "${command[@]}" --check --diff
-    elif [[ "${plan_mode}" == "finalize" ]]; then
-      ANSIBLE_CONFIG="${controller_dir}/ansible/ansible.cfg" \
-      ANSIBLE_VARS_ENABLED='' \
-      ANSIBLE_LOCAL_TEMP="${ansible_temp}" \
-        "${command[@]}"
-    else
-      ANSIBLE_CONFIG="${controller_dir}/ansible/ansible.cfg" \
-      ANSIBLE_VARS_ENABLED='' \
-      ANSIBLE_LOCAL_TEMP="${ansible_temp}" \
-        "${command[@]}" --check
-    fi
-  } 2>&1 | tee "${log_file}"
-  pipeline_status=("${PIPESTATUS[@]}")
-  status="${pipeline_status[0]}"
-  set -e
-  chmod 0600 "${log_file}"
-
-  if [[ "${status}" -ne 0 ]]; then
-    die "Legacy plan failed with exit code ${status}. Review ${log_file}"
-  fi
-  if [[ "${plan_mode}" == "finalize" ]]; then
-    printf '\nLegacy control-plane finalization completed.\n'
-    printf 'Only ha-adm-cfg and read-only status tags were run.\n'
-    printf 'Review log: %s\n' "${log_file}"
-  else
-    printf '\nLegacy check mode completed. No apply was performed.\n'
-    printf 'Review log: %s\n' "${log_file}"
-  fi
 }
 
 stage_legacy_control_plane() {
@@ -332,7 +166,7 @@ stage_legacy_control_plane() {
 
   source_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
   controller_dir="${EASY_HA_PROXY_CONTROLLER_DIR:-$(cd -- "$(dirname -- "${source_path}")" && pwd)}"
-  [[ -f "${controller_dir}/installer/easy_ha_proxy.py" ]] ||
+  [[ -f "${controller_dir}/installer/easy-ha-proxy" ]] ||
     die "Controller source tree not found under ${controller_dir}."
 
   if [[ -z "${inventory}" ]]; then
@@ -361,7 +195,7 @@ sync_managed_source() {
 
   source_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
   controller_dir="${EASY_HA_PROXY_CONTROLLER_DIR:-$(cd -- "$(dirname -- "${source_path}")" && pwd)}"
-  [[ -f "${controller_dir}/installer/easy_ha_proxy.py" ]] ||
+  [[ -f "${controller_dir}/installer/easy-ha-proxy" ]] ||
     die "Controller source tree not found under ${controller_dir}."
 
   if [[ -z "${inventory}" ]]; then
@@ -410,7 +244,7 @@ restore_full_remote() {
     die "Encrypted full backup not found: ${backup:-<missing>}"
   source_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
   controller_dir="${EASY_HA_PROXY_CONTROLLER_DIR:-$(cd -- "$(dirname -- "${source_path}")" && pwd)}"
-  [[ -f "${controller_dir}/installer/full_backup.py" ]] ||
+  [[ -f "${controller_dir}/installer/easy-ha-proxy" ]] ||
     die "Controller recovery source not found under ${controller_dir}."
   if [[ -z "${inventory}" ]]; then
     discover_inventory_files
@@ -664,7 +498,7 @@ prompt_remote_connection() {
     cat <<'EOF'
 
 Как подключиться к удалённой машине?
-  1) Использовать Ansible INI inventory
+  1) Использовать INI inventory (inventory.ini)
   2) Логин и пароль SSH
   3) Логин и приватный SSH-ключ
   0) Назад
@@ -674,7 +508,7 @@ EOF
     cat <<'EOF'
 
 How should the remote machine be accessed?
-  1) Use an Ansible INI inventory
+  1) Use an INI inventory (inventory.ini)
   2) SSH username and password
   3) SSH username and private key
   0) Back
@@ -828,21 +662,9 @@ case "${mode}" in
     shift
     prepare_legacy_config "${1:-}"
     ;;
-  plan-legacy)
-    shift
-    plan_legacy_config "${1:-}" "${2:-}" full
-    ;;
-  diff-legacy-haproxy)
-    shift
-    plan_legacy_config "${1:-}" "${2:-}" haproxy-diff
-    ;;
   stage-legacy)
     shift
     stage_legacy_control_plane "${1:-}" "${2:-}" "${3:-}"
-    ;;
-  finalize-legacy)
-    shift
-    plan_legacy_config "${1:-}" "${2:-}" finalize
     ;;
   sync-source)
     shift

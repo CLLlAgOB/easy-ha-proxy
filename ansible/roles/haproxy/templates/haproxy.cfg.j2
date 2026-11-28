@@ -78,6 +78,22 @@
 {# HAProxy Admin is a privileged control plane. It always inherits the global
    Authelia state; a runtime vars.yml value must not downgrade authentication. #}
 {% set admin_authelia_enabled = authelia_enabled %}
+{# The portals of the extra Authelia sign-in domains (authelia_extra_domains).
+   A browser keeps a cookie to its own registrable domain, so a site under
+   another domain signs in through a portal under that domain; all of them
+   are the same Authelia. They get an ACL of their own: host_authelia stays
+   the main portal alone, the protected service domain that the panel and
+   controld refuse to see changed outside migrate-domain. Every rule that
+   names host_authelia is repeated for host_authelia_extra. #}
+{% set extra_portals = [] %}
+{% if aut_domain is defined and authelia_enabled %}
+{% for _extra in authelia_extra_domains | default([], true) %}
+{% if _extra.portal | default('') and _extra.portal != aut_domain and _extra.portal not in extra_portals %}
+{% set _ = extra_portals.append(_extra.portal) %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% set portal_acls = ['host_authelia'] + (['host_authelia_extra'] if extra_portals else []) %}
 {# passthrough sites #}
 {% set passthru_sites = sites | selectattr('tcp_passthrough','defined') | selectattr('tcp_passthrough') | list %}
 {% set has_passthru = (passthru_sites | length > 0) %}
@@ -116,7 +132,9 @@ global
     tune.ssl.cachesize 10000
     tune.ssl.lifetime 3600
     tune.idle-pool.shared on
+    .if version_atleast(2.8)
     tune.stick-counters 4
+    .endif
 
     localpeer {{ localpeer }}
 
@@ -153,7 +171,7 @@ defaults
     # kilobytes more than needed. Only text types are listed, responses that
     # already carry Content-Encoding are skipped, and TCP-mode frontends ignore
     # this. Safe against BREACH here: the session cookie is SameSite=Strict and
-    # Flask-WTF re-randomizes the CSRF token in every response.
+    # the panel masks the CSRF token afresh in every response.
     compression algo gzip
     compression type {{ haproxy_compression_types | default('text/html text/css text/plain application/javascript application/json application/xml image/svg+xml') }}
 {% endif %}
@@ -451,6 +469,9 @@ frontend fe_https
 {% if aut_domain is defined and authelia_enabled %}
 {% set _ = sni_domains.append(aut_domain) %}
 {% endif %}
+{% for _portal in extra_portals %}
+{% set _ = sni_domains.append(_portal) %}
+{% endfor %}
 
     acl valid_sni ssl_fc_sni -i {{ sni_domains | unique | join(' ') }}
 
@@ -485,12 +506,16 @@ frontend fe_https
 
 {% if aut_domain is defined and authelia_enabled %}
     acl host_authelia hdr(host) -i {{ aut_domain }}
+{% if extra_portals %}
+    acl host_authelia_extra hdr(host) -i {{ extra_portals | join(' ') }}
+{% endif %}
     acl path_access_granted path -i /access_granted
 {% endif %}
 
 {% set all_hosts = [] %}
 {% if admin_domain is defined %}{% set _ = all_hosts.append(admin_domain) %}{% endif %}
 {% if aut_domain is defined and authelia_enabled %}{% set _ = all_hosts.append(aut_domain) %}{% endif %}
+{% for _portal in extra_portals %}{% set _ = all_hosts.append(_portal) %}{% endfor %}
 {% for site in sites %}
 {% set s = sd | combine(site, recursive=True) %}
 {% set _ = all_hosts.append(s.domain) %}
@@ -823,18 +848,33 @@ frontend fe_https
 {# A request-rate ceiling exists to slow down strangers. On a site only the
    named addresses can reach, it can only ever throttle the operator. #}
 {% if max_req_rate > 0 and not (s.allow_ips | default([])) %}
-    http-request track-sc3 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if u02 and authelia_enabled %} !ip_auth_ok{% endif %}
-
-    http-request set-var(txn._rate_tracked) bool(true) if host_{{ id }} !{ var(txn._rate_tracked) -m bool }
-
+{% set rate_ban = (s.rate_ban | default(false)) and not u02 %}
     acl too_fast_{{ id }} src_http_req_rate(tbl_rate_{{ id }}) gt {{ max_req_rate }}
 
-{% if s.rate_ban | default(false) and not u02 %}
-    http-request set-var(txn.ban_code)   int(30) if host_{{ id }} too_fast_{{ id }} !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+    .if version_atleast(2.8)
+    http-request track-sc3 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if u02 and authelia_enabled %} !ip_auth_ok{% endif %}
 
-    http-request set-var(txn.ban_reason) str("RATE_LIMIT_SITE name={{ s.name }} max_req_rate={{ max_req_rate }}") if host_{{ id }} too_fast_{{ id }} !{ var(txn.ban_reason) -m found } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+    .endif
+{% if rate_ban %}
+    .if version_atleast(2.8)
+    acl rate_ban_{{ id }} src_http_req_rate(tbl_rate_{{ id }}) gt {{ max_req_rate }}
+    .endif
+    # With three slots, decide the ban before counting this request so sc2
+    # is free for tbl_ban. A request at the limit would take it over.
+    .if !version_atleast(2.8)
+    acl rate_ban_{{ id }} src_http_req_rate(tbl_rate_{{ id }}) ge {{ max_req_rate }}
+    .endif
+
+    http-request set-var(txn.ban_code)   int(30) if host_{{ id }} rate_ban_{{ id }} !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    http-request set-var(txn.ban_reason) str("RATE_LIMIT_SITE name={{ s.name }} max_req_rate={{ max_req_rate }}") if host_{{ id }} rate_ban_{{ id }} !{ var(txn.ban_reason) -m found } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
 {% endif %}
+    .if !version_atleast(2.8)
+    http-request track-sc2 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if u02 and authelia_enabled %} !ip_auth_ok{% endif %}
+
+    .endif
+    http-request set-var(txn._rate_tracked) bool(true) if host_{{ id }} !{ var(txn._rate_tracked) -m bool }
 
 {% endif %}
 {% endfor %}
@@ -888,9 +928,17 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {% set max_req_rate = (s.max_req_rate | default(0)) | int %}
-{% if max_req_rate > 0 and (u02 or not (s.rate_ban | default(false))) and not (s.allow_ips | default([])) %}
+{% if max_req_rate > 0 and not (s.allow_ips | default([])) %}
+{% set rate_ban = (s.rate_ban | default(false)) and not u02 %}
+{% if rate_ban %}
+    .if !version_atleast(2.8)
+    # The rate may have crossed the threshold concurrently since the ban check.
+{% endif %}
     http-request deny status 429 if host_{{ id }} too_fast_{{ id }} !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if u02 and authelia_enabled %} !ip_auth_ok{% endif %}
 
+{% if rate_ban %}
+    .endif
+{% endif %}
 {% endif %}
 {% endfor %}
 {% if u02 %}
@@ -1032,13 +1080,14 @@ frontend fe_https
 {% set _ = authelia_hosts.append(admin_domain) %}
 {% endif %}
 
+{% set authelia_forward_req_headers = 'x-forwarded-method,x-forwarded-proto,x-forwarded-host,x-forwarded-uri,x-forwarded-for,cookie,authorization,proxy-authorization,accept,origin,user-agent,x-requested-with' %}
 {% if authelia_hosts | length > 0 %}
 {% set admin_probe_condition = ' !admin_control_plane_probe' if admin_domain is defined else '' %}
 {% if admin_domain is defined and (metrics_export_enabled | default(false)) %}
 {% set admin_probe_condition = admin_probe_condition ~ ' !admin_metrics_scrape' %}
 {% endif %}
     acl authelia_protected hdr(host) -i {{ authelia_hosts | unique | join(' ') }}
-    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * remote-user,remote-groups,remote-name,remote-email - if authelia_protected{{ admin_probe_condition }}
+    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD {{ authelia_forward_req_headers }} remote-user,remote-groups,remote-name,remote-email - if authelia_protected{{ admin_probe_condition }}
     http-request deny if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
     http-request redirect location %[var(txn.auth_response_location)] if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
     http-request deny status 503 if authelia_protected{{ admin_probe_condition }} !{ var(txn.auth_response_successful) -m bool }
@@ -1051,12 +1100,14 @@ frontend fe_https
 {% endif %}
 
 {% if aut_domain is defined %}
-    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD * remote-user,remote-groups,remote-name,remote-email - if host_authelia path_access_granted
-    http-request deny if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
-    http-request redirect location %[var(txn.auth_response_location)] if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
-    http-request deny status 503 if host_authelia path_access_granted !{ var(txn.auth_response_successful) -m bool }
-    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if host_authelia path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
-    http-request set-var(txn.log_auth_user) var(req.auth_response_header.remote_user),bytes(0,256),url_enc if host_authelia path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
+{% for _pacl in portal_acls %}
+    http-request lua.auth-intercept authelia_backend /api/authz/forward-auth HEAD {{ authelia_forward_req_headers }} remote-user,remote-groups,remote-name,remote-email - if {{ _pacl }} path_access_granted
+    http-request deny if {{ _pacl }} path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_code) -m int 403 }
+    http-request redirect location %[var(txn.auth_response_location)] if {{ _pacl }} path_access_granted !{ var(txn.auth_response_successful) -m bool } { var(txn.auth_response_location) -m found }
+    http-request deny status 503 if {{ _pacl }} path_access_granted !{ var(txn.auth_response_successful) -m bool }
+    http-request set-var(txn.ip_auth_add) src_inc_gpc0(tbl_ip_auth) if {{ _pacl }} path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
+    http-request set-var(txn.log_auth_user) var(req.auth_response_header.remote_user),bytes(0,256),url_enc if {{ _pacl }} path_access_granted { var(txn.auth_response_successful) -m bool } { var(req.auth_response_header.remote_user) -m len gt 0 }
+{% endfor %}
 {% endif %}
 {% endif %}
 
@@ -1108,8 +1159,10 @@ frontend fe_https
 {% endif %}
 
 {% if aut_domain is defined and authelia_enabled %}
-    use_backend be_access_granted if host_authelia path_access_granted
-    use_backend authelia_backend if authelia_up host_authelia !path_access_granted
+{% for _pacl in portal_acls %}
+    use_backend be_access_granted if {{ _pacl }} path_access_granted
+    use_backend authelia_backend if authelia_up {{ _pacl }} !path_access_granted
+{% endfor %}
 {% endif %}
 {% if admin_domain is defined %}
     # HAProxy's statistics page, on the admin host only and after its
@@ -1211,6 +1264,9 @@ frontend fe_http80
 {% endfor %}
 {% if aut_domain is defined and authelia_enabled %}
     acl host_authelia hdr(host) -i {{ aut_domain }}
+{% if extra_portals %}
+    acl host_authelia_extra hdr(host) -i {{ extra_portals | join(' ') }}
+{% endif %}
 {% endif %}
 
 {% for site in sites %}
@@ -1221,7 +1277,9 @@ frontend fe_http80
 {% endif %}
 {% endfor %}
 {% if aut_domain is defined and authelia_enabled %}
-    http-request redirect scheme https code 301 if host_authelia !acme_challenge_http
+{% for _pacl in portal_acls %}
+    http-request redirect scheme https code 301 if {{ _pacl }} !acme_challenge_http
+{% endfor %}
 {% endif %}
 
     http-request return status 404 content-type text/plain lf-string "Not found" if !acme_challenge_http

@@ -17,8 +17,8 @@ bash /tmp/easy-ha-proxy-install.sh
 При запуске без параметров помощник:
 
 1. Предлагает выбрать English или Русский; Enter выбирает English.
-2. Ищет установленный CLI, конфигурацию, внутренний Python/Ansible venv,
-   playbook и системные компоненты.
+2. Ищет установленный CLI, конфигурацию, агент хоста, playbook и системные
+   компоненты.
 3. Определяет состояние: чистая, частично установленная или управляемая система.
 4. Определяет режим конфигурации: production или test mode.
 5. Показывает подходящие действия и запрашивает подтверждение перед изменениями.
@@ -319,53 +319,11 @@ bash ./install.sh prepare-legacy \
 - действующие Authelia/SMTP-секреты переносятся без вывода значений;
 - создаются локальный inventory и migration metadata.
 
-Это локальная операция: данные не отправляются на сервер, Ansible не
-запускается, сервисы не изменяются. `prepared-config` также содержит секреты и
+Это локальная операция: данные не отправляются на сервер, сервисы не
+изменяются. `prepared-config` также содержит секреты и
 не должен попадать в Git.
 
-### Check mode подготовленной legacy-конфигурации
-
-После создания `prepared-config`:
-
-```bash
-bash ./install.sh plan-legacy
-```
-
-Команда автоматически выбирает последний `prepared-config` и найденный
-удалённый `inventory.ini`, показывает пути и запрашивает подтверждение. Затем
-выполняются:
-
-1. `ansible-playbook --syntax-check`;
-2. ограниченный набор update/config тегов с `--check`;
-3. read-only status-задачи.
-
-`--diff` намеренно не используется, чтобы шаблоны с секретами не попали в
-вывод. Полный лог сохраняется рядом со snapshot как
-`legacy-plan-<дата>.log` с режимом `0600`. Apply не выполняется.
-
-Явные пути:
-
-```bash
-bash ./install.sh plan-legacy \
-  "$HOME/easy-ha-proxy-backups/legacy-<дата>/prepared-config" \
-  ./inventory.ini
-```
-
-Если полный plan показывает изменение `Copy HAProxy configuration`, перед
-любым apply выполните отдельный защищённый diff:
-
-```bash
-bash ./install.sh diff-legacy-haproxy
-```
-
-Команда запускает только тег `ha-cfg` с `--check --diff`, валидирует
-отрендеренный конфиг через `haproxy -c` и сохраняет результат как
-`legacy-haproxy-diff-<дата>.log` с режимом `0600`. HAProxy не
-перезагружается.
-
 ### Принятие legacy-сервера под управление
-
-Когда полный `plan-legacy` завершился без ошибок, а HAProxy diff проверен:
 
 ```bash
 bash ./install.sh stage-legacy
@@ -388,8 +346,8 @@ bash ./install.sh stage-legacy \
   Vault, backups, устаревших PEM и архивов;
 - помещает подготовленную конфигурацию в `/etc/easy-ha-proxy` с правами
   `0700/0600`;
-- создаёт `/opt/easy-ha-proxy/source`, изолированный Python venv и команды
-  `easy-ha-proxy`/`easy-ha-proxy-assistant`;
+- создаёт `/opt/easy-ha-proxy/source`, загружает агент хоста, собранный для
+  этих исходников, и создаёт команды `easy-ha-proxy`/`easy-ha-proxy-assistant`;
 - останавливается, если целевые каталоги уже существуют.
 
 На этом этапе playbook не запускается, Docker-образы не скачиваются,
@@ -400,19 +358,20 @@ HAProxy/Authelia/UI не перезапускаются и действующи�
 sudo easy-ha-proxy plan
 ```
 
-Если этот plan завершился с `failed=0`, сервисы работают, а среди реальных
-конфигурационных изменений осталась только синхронизация
-`haproxy.cfg.j2` для UI, завершите принятие сервера:
+План перечисляет каждый шаг, который что-то изменил бы; `Copy HAProxy
+configuration` в нём означает, что отрендеренный `haproxy.cfg` отличается от
+действующего. Если план завершился с `failed=0`, сервисы работают, а среди
+реальных конфигурационных изменений осталась только синхронизация
+`haproxy.cfg.j2` для UI, завершите принятие сервера на нём самом:
 
 ```bash
-bash ./install.sh finalize-legacy
+sudo easy-ha-proxy-agent apply playbook --tags ha-adm-cfg,status \
+  --source /opt/easy-ha-proxy/source --config /etc/easy-ha-proxy
 ```
 
-Команда требует точного подтверждения `APPLY`, выполняет только теги
-`ha-adm-cfg,status` и сохраняет защищённый лог
-`legacy-finalize-<дата>.log`. Она не обновляет Docker, не скачивает образы и
-не меняет активный `/etc/haproxy/haproxy.cfg`; синхронизируется шаблон, который
-UI будет использовать при последующих изменениях сайтов.
+Выполняются только теги `ha-adm-cfg,status`: Docker не обновляется, образы не
+скачиваются, активный `/etc/haproxy/haproxy.cfg` не меняется; синхронизируется
+шаблон, который UI будет использовать при последующих изменениях сайтов.
 
 ### Синхронизация локальной версии исходников
 
@@ -508,9 +467,10 @@ list.
   системе остаётся активной прежняя версия. Первая установка может продолжить
   работу без отображения стран только при выключенной GeoIP-фильтрации HAProxy.
 - **Как обновить совсем старую неуправляемую установку?** Не запускайте полный
-  apply напрямую. Сначала пройдите `snapshot-legacy`, `prepare-legacy`,
-  `plan-legacy`, `stage-legacy` и `finalize-legacy`; после принятия сервера под
-  управление выполните обычное полное обновление, которое перенесёт GeoIP и UI.
+  apply напрямую. Сначала пройдите `snapshot-legacy`, `prepare-legacy` и
+  `stage-legacy`, проверьте `sudo easy-ha-proxy plan` на сервере и завершите
+  принятие, как описано выше; затем выполните обычное полное обновление,
+  которое перенесёт GeoIP и UI.
 
 ## Точечные обновления в HAProxy Admin
 
@@ -594,7 +554,7 @@ bash ./install.sh backup-full inventory-production.ini proxy01
 В core payload входят:
 
 - `/etc/easy-ha-proxy` со всеми конфигами, metadata и secrets;
-- точная версия `/opt/easy-ha-proxy/source` без переносимого venv;
+- точная версия `/opt/easy-ha-proxy/source`;
 - HAProxy, GeoIP, managed iptables ban-rules, AppArmor, rsyslog, logrotate и
   sysctl;
 - `/etc/letsencrypt` целиком: accounts, renewal-конфиги и все скрипты из
@@ -604,7 +564,7 @@ bash ./install.sh backup-full inventory-production.ini proxy01
 - systemd units/drop-ins и все managed helper-скрипты;
 - манифест ОС, пакетов, systemd, Docker-контейнеров и image digest.
 
-Docker-образы, системные пакеты и Python venv в архив не копируются: при
+Docker-образы, системные пакеты и агент хоста в архив не копируются: при
 восстановлении они воспроизводятся установщиком для архитектуры нового сервера.
 `/etc/iptables/rules.v4` и `/etc/iptables/rules.v6` намеренно не считаются
 переносимым конфигом: на Docker-хосте это runtime-снимки с цепочками `DOCKER`,
@@ -651,9 +611,9 @@ bash ./install.sh restore-full \
    удалить ключ доступа к новому серверу, и не перезапускает sshd;
 5. разворачивает данные, сохраняет исходники из backup как
    `/opt/easy-ha-proxy/source.from-backup.<дата>.<pid>`, активирует актуальный
-   recovery source с управляющего компьютера, пересоздаёт venv, устанавливает
-   зависимости и применяет восстановленную конфигурацию; runtime-снимки
-   `/etc/iptables/rules.v4`/`rules.v6` при этом отключаются до запуска Ansible,
+   recovery source с управляющего компьютера, устанавливает зависимости и
+   применяет восстановленную конфигурацию агентом хоста; runtime-снимки
+   `/etc/iptables/rules.v4`/`rules.v6` при этом отключаются до запуска playbook,
    чтобы не перетереть Docker NAT-цепочки нового сервера;
 6. не перевыпускает сертификаты автоматически: используются восстановленные
    сертификаты и Certbot renewal state.
@@ -700,7 +660,10 @@ sudo easy-ha-proxy migrate-domain
 
 Старые сертификаты сразу не удаляются: это позволяет выполнить ручной откат.
 Сессии Authelia, привязанные к прежнему cookie-domain, могут потребовать
-повторного входа.
+повторного входа. Дополнительные домены входа Authelia (добавляются на
+странице настроек Authelia в панели) остаются как есть; новый корневой домен,
+совпадающий с одним из них, лежащий над ним или под ним, отклоняется, пока
+этот домен входа не удалён.
 
 Только предварительный план с рабочей машины:
 
@@ -750,7 +713,7 @@ bash ./install.sh remote --inventory ./inventory.ini --limit my_server \
 
 - команды `/usr/local/bin/easy-ha-proxy` либо внутреннего CLI;
 - `/etc/easy-ha-proxy/metadata.yml`;
-- `/opt/easy-ha-proxy/venv/bin/python`;
+- `/usr/local/sbin/easy-ha-proxy-agent`;
 - `/opt/easy-ha-proxy/source/ansible/easy-ha-proxy.yml`.
 
 Кроме этих файлов конфигурация отмечается завершённой только после успешного

@@ -8,6 +8,9 @@ umask 077
 
 STATE_FILE="{{ easy_ha_proxy_config_dir | default('/etc/easy-ha-proxy') }}/mail-notify.json"
 LOCK_FILE="/run/easy-ha-proxy/authelia-mail.lock"
+# The agent checks the panel's settings and the renewed names before they
+# reach the mail headers; it prints ENABLED, TO, FROM and DOMAINS.
+AGENT={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') | quote }}
 
 # The settings daemon holds this lock exclusively while changing/recreating the
 # relay. Certbot takes a shared lock so it cannot enqueue between queue checks.
@@ -23,52 +26,7 @@ fi
 
 [ -f "${STATE_FILE}" ] || exit 0
 if ! IFS=$'\t' read -r ENABLED TO FROM DOMAINS < <(
-  /usr/bin/python3 -c '
-import json, re, sys
-
-control = re.compile(r"[\x00-\x1f\x7f]")
-email = re.compile(
-    r"^[A-Za-z0-9.!#$%&\x27*+/=?^_`{|}~-]+@"
-    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
-    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
-)
-domain = re.compile(
-    r"^(?:\*\.)?(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
-    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
-)
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as stream:
-        state = json.load(stream)
-    enabled = state.get("enabled") is True
-    recipient = state.get("to", "")
-    sender = state.get("from", "")
-    if not enabled:
-        print("0", "", "", "", sep="\t")
-        sys.exit(0)
-    domains = sys.argv[2].split()
-    only_for = state.get("only_for", [])
-    if (
-        not isinstance(recipient, str)
-        or not isinstance(sender, str)
-        or control.search(recipient)
-        or control.search(sender)
-        or not email.fullmatch(recipient)
-        or not email.fullmatch(sender)
-        or not domains
-        or any(not domain.fullmatch(item) for item in domains)
-        or not isinstance(only_for, list)
-        or any(
-            not isinstance(item, str) or not domain.fullmatch(item)
-            for item in only_for
-        )
-    ):
-        raise ValueError("invalid notification state")
-    if only_for and not set(domains).intersection(only_for):
-        enabled = False
-    print("1" if enabled else "0", recipient, sender, " ".join(domains), sep="\t")
-except Exception:
-    sys.exit(1)
-' "${STATE_FILE}" "${RENEWED_DOMAINS}"
+  "${AGENT}" cert-notify-state "${STATE_FILE}" "${RENEWED_DOMAINS}"
 ); then
   /usr/bin/logger -t easy-ha-proxy-cert-notify "certificate notification state is invalid; message skipped"
   exit 0

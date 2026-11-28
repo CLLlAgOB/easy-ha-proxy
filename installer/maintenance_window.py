@@ -1,4 +1,10 @@
-"""One consent record and one local-time window for software maintenance."""
+"""One consent record and one local-time window for software maintenance.
+
+Read only by the update broker of releases before 1.2.0, which loads this
+module while it applies the update to this version (the agent has the window
+in go/agent/internal/hostsec). Remove it, and haproxy_package_migrate.py,
+once no supported gateway runs such a release.
+"""
 from __future__ import annotations
 
 import datetime as dt

@@ -55,6 +55,7 @@ Connection options:
       --apply              With --sync-source, immediately apply synchronized source
       --restore-full FILE  Restore an encrypted full backup on the target
       --restore-mode MODE  auto, fresh or overlay (default: auto)
+      --allow-legacy-v1   Accept an unauthenticated v1 backup from a trusted source
       --source-root DIR    Local project root used for staging/sync; with a
                            clean install, test these exact local sources
       --source-channel CH  github or local
@@ -147,9 +148,8 @@ build_source_archive() {
 installer_fingerprint() {
   local root="$1"
   local -a files=(
-    installer/easy_ha_proxy.py
     installer/easy-ha-proxy
-    installer/requirements.txt
+    installer/agent-fetch.sh
     install-local.sh
   )
   local file=""
@@ -300,6 +300,7 @@ prepared_config_dir=""
 source_root=""
 restore_archive=""
 restore_mode="auto"
+allow_legacy_v1=false
 local_snapshot_root="${EASY_HA_PROXY_BACKUP_DIR:-${HOME:-${PWD}}/easy-ha-proxy-backups}"
 
 while [[ "$#" -gt 0 ]]; do
@@ -378,6 +379,10 @@ while [[ "$#" -gt 0 ]]; do
       [[ "$#" -ge 2 ]] || die "Missing restore mode."
       restore_mode="$2"
       shift 2
+      ;;
+    --allow-legacy-v1)
+      allow_legacy_v1=true
+      shift
       ;;
     --source-root)
       [[ "$#" -ge 2 ]] || die "Missing local project root."
@@ -554,7 +559,7 @@ if [[ "${remote_action}" == "stage-legacy" ||
       "${remote_action}" == "restore-full" ]]; then
   source_root="${source_root:-${script_dir:-${PWD}}}"
   [[ -d "${source_root}/ansible/roles" &&
-     -f "${source_root}/installer/easy_ha_proxy.py" &&
+     -f "${source_root}/installer/easy-ha-proxy" &&
      -f "${source_root}/install-local.sh" ]] ||
     die "easy-ha-proxy source tree not found under: ${source_root}"
 fi
@@ -565,7 +570,7 @@ if [[ "${source_channel}" == "local" &&
 fi
 if [[ -n "${source_root}" ]]; then
   [[ -d "${source_root}/ansible/roles" &&
-     -f "${source_root}/installer/easy_ha_proxy.py" &&
+     -f "${source_root}/installer/easy-ha-proxy" &&
      -f "${source_root}/install-local.sh" ]] ||
     die "easy-ha-proxy source tree not found under: ${source_root}"
 fi
@@ -599,6 +604,7 @@ target="${ssh_host}"
 if [[ -n "${ssh_user}" ]]; then
   target="${ssh_user}@${ssh_host}"
 fi
+[[ "${ssh_host}" != -* && "${ssh_user}" != -* ]] || die "Invalid SSH destination: ${target}"
 
 if [[ "${dry_run}" == true ]]; then
   printf '[%s] Target: %s\n' "${product}" "${target}"
@@ -648,25 +654,48 @@ if [[ ! -r "${local_installer_file}" || ! -r "${helper_file}" ]]; then
     die "curl is required when local helper files are unavailable."
 fi
 
-temporary_installer="$(mktemp -t easy-ha-proxy-install-local.XXXXXX.sh)"
-temporary_helper="$(mktemp -t easy-ha-proxy-helper.XXXXXX.sh)"
-remote_output_file="$(mktemp -t easy-ha-proxy-remote-output.XXXXXX.log)"
+local_tmp_dir="$(mktemp -d -t easy-ha-proxy-remote.XXXXXX)"
+chmod 0700 "${local_tmp_dir}"
+temporary_installer="${local_tmp_dir}/install-local.sh"
+temporary_helper="${local_tmp_dir}/helper.sh"
+remote_output_file="${local_tmp_dir}/remote-output.log"
 temporary_source_archive=""
 temporary_config_archive=""
 activate_current_source=false
-control_path="/tmp/easy-ha-proxy-ssh.$$.sock"
-remote_installer="/tmp/easy-ha-proxy-install-local.sh"
-remote_helper="/tmp/easy-ha-proxy-helper.sh"
-remote_source_archive="/tmp/easy-ha-proxy-source.$$.tgz"
-remote_config_archive="/tmp/easy-ha-proxy-config.$$.tgz"
-remote_restore_archive="/tmp/easy-ha-proxy-full-restore.$$.tar.gz.enc"
-remote_recovery_root="/tmp/easy-ha-proxy-recovery.$$"
+control_path="${local_tmp_dir}/ssh.sock"
+remote_stage_dir=""
+remote_installer=""
+remote_helper=""
+remote_source_archive=""
+remote_config_archive=""
+remote_restore_archive=""
+remote_recovery_root=""
 staged_remote_export=""
 ssh_options=()
 scp_options=()
 reboot_probe_options=()
 reboot_monitor_available=false
 reboot_monitor_boot_id=""
+
+ensure_remote_stage_dir() {
+  if [[ -n "${remote_stage_dir}" ]]; then
+    return 0
+  fi
+  remote_stage_dir="$(
+    ssh "${ssh_options[@]}" "${target}" \
+      "umask 077 && mktemp -d /tmp/easy-ha-proxy-stage.XXXXXX" \
+      </dev/null | tr -d '\r' | tail -n 1
+  )"
+  if [[ ! "${remote_stage_dir}" =~ ^/tmp/easy-ha-proxy-stage\.[A-Za-z0-9._-]+$ ]]; then
+    die "Failed to create a private remote staging directory."
+  fi
+  remote_installer="${remote_stage_dir}/install-local.sh"
+  remote_helper="${remote_stage_dir}/helper.sh"
+  remote_source_archive="${remote_stage_dir}/source.tgz"
+  remote_config_archive="${remote_stage_dir}/config.tgz"
+  remote_restore_archive="${remote_stage_dir}/full-restore.tar.gz.enc"
+  remote_recovery_root="${remote_stage_dir}/recovery"
+}
 
 remote_cleanup_as_root() {
   local command_text="$1"
@@ -685,6 +714,7 @@ prepare_remote_reboot_monitoring() {
     -o "ControlPath=none"
   )
   [[ -n "${identity_file}" ]] && reboot_probe_options+=(-i "${identity_file}")
+  reboot_probe_options+=(--)
 
   [[ "${ask_pass}" != true ]] || return 0
   if reboot_monitor_boot_id="$(
@@ -717,7 +747,7 @@ wait_for_remote_reboot() {
     return 0
   fi
 
-  ssh -S "${control_path}" -O exit "${target}" </dev/null >/dev/null 2>&1 || true
+  ssh -S "${control_path}" -O exit -- "${target}" </dev/null >/dev/null 2>&1 || true
   if [[ "${language}" == "ru" ]]; then
     printf '[%s] Ожидаю перезагрузку и смену boot_id сервера...\n' "${product}"
   else
@@ -758,28 +788,18 @@ wait_for_remote_reboot() {
 }
 
 cleanup() {
-  if [[ "${remote_action}" == "stage-legacy" ||
-        "${remote_action}" == "sync-source" ||
-        "${remote_action}" == "language" ||
-        "${remote_action}" == "promote-production" ||
-        "${remote_action}" == "restore-full" ||
-        "${activate_current_source}" == true ||
-        "${stage_install_source}" == true ]]; then
-    remote_cleanup_as_root \
-      "rm -rf ${remote_recovery_root}; rm -f ${remote_source_archive} ${remote_config_archive} ${remote_restore_archive} ${remote_restore_archive}.sha256 ${remote_installer} ${remote_helper}"
+  if [[ -n "${remote_stage_dir}" ]]; then
+    remote_cleanup_as_root "rm -rf ${remote_stage_dir}"
   fi
   if [[ -n "${staged_remote_export}" ]]; then
     remote_cleanup_as_root \
       "rm -f ${staged_remote_export} ${staged_remote_export}.sha256"
   fi
-  ssh -S "${control_path}" -O exit "${target}" </dev/null >/dev/null 2>&1 || true
+  ssh -S "${control_path}" -O exit -- "${target}" </dev/null >/dev/null 2>&1 || true
   rm -f \
-    "${temporary_installer}" \
-    "${temporary_helper}" \
     "${temporary_source_archive}" \
-    "${temporary_config_archive}" \
-    "${remote_output_file}" \
-    "${control_path}"
+    "${temporary_config_archive}"
+  rm -rf "${local_tmp_dir}"
 }
 trap cleanup EXIT
 
@@ -788,7 +808,7 @@ if [[ -r "${local_installer_file}" ]]; then
   cp -- "${local_installer_file}" "${temporary_installer}"
 else
   printf '[%s] Downloading local installer\n' "${product}"
-  curl -fsSL "${local_installer_url}" -o "${temporary_installer}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 180 "${local_installer_url}" -o "${temporary_installer}"
 fi
 chmod 0700 "${temporary_installer}"
 if [[ -r "${helper_file}" ]]; then
@@ -796,7 +816,7 @@ if [[ -r "${helper_file}" ]]; then
   cp -- "${helper_file}" "${temporary_helper}"
 else
   printf '[%s] Downloading maintenance helper\n' "${product}"
-  curl -fsSL "${helper_url}" -o "${temporary_helper}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 180 "${helper_url}" -o "${temporary_helper}"
 fi
 chmod 0700 "${temporary_helper}"
 
@@ -806,7 +826,7 @@ common_options=(
   -o "ControlPath=${control_path}"
 )
 ssh_options=(-p "${ssh_port}" "${common_options[@]}")
-scp_options=(-P "${ssh_port}" "${common_options[@]}")
+scp_options=(-p -P "${ssh_port}" "${common_options[@]}")
 if [[ -n "${identity_file}" ]]; then
   ssh_options+=(-i "${identity_file}")
   scp_options+=(-i "${identity_file}")
@@ -819,6 +839,8 @@ if [[ "${ask_pass}" == true ]]; then
   ssh_options+=("${password_options[@]}")
   scp_options+=("${password_options[@]}")
 fi
+ssh_options+=(--)
+scp_options+=(--)
 
 controller_source_root="${source_root:-${script_dir}}"
 case "${remote_action}" in
@@ -829,19 +851,18 @@ case "${remote_action}" in
     if [[ "${source_channel}" == "local" ]]; then
       activate_current_source=true
     elif [[ -n "${controller_source_root}" &&
-            -f "${controller_source_root}/installer/easy_ha_proxy.py" ]]; then
+            -f "${controller_source_root}/installer/easy-ha-proxy" ]]; then
       local_installer_fingerprint="$(
         installer_fingerprint "${controller_source_root}" 2>/dev/null || true
       )"
       remote_installer_fingerprint="$(
         ssh "${ssh_options[@]}" "${target}" \
-          "if test -f /opt/easy-ha-proxy/source/installer/easy_ha_proxy.py && \
-              test -f /opt/easy-ha-proxy/source/installer/easy-ha-proxy && \
-              test -f /opt/easy-ha-proxy/source/installer/requirements.txt && \
+          "if test -f /opt/easy-ha-proxy/source/installer/easy-ha-proxy && \
+              test -f /opt/easy-ha-proxy/source/installer/agent-fetch.sh && \
               test -f /opt/easy-ha-proxy/source/install-local.sh; then \
              cd /opt/easy-ha-proxy/source && \
-             sha256sum installer/easy_ha_proxy.py installer/easy-ha-proxy \
-               installer/requirements.txt install-local.sh | \
+             sha256sum installer/easy-ha-proxy installer/agent-fetch.sh \
+               install-local.sh | \
              sha256sum | awk '{ print \$1 }'; fi" \
           </dev/null 2>/dev/null | tr -d '\r' | tail -n 1
       )"
@@ -883,13 +904,14 @@ if [[ "${activate_current_source}" == true ]]; then
   source_root="${controller_source_root}"
   [[ -n "${source_root}" &&
      -d "${source_root}/ansible/roles" &&
-     -f "${source_root}/installer/easy_ha_proxy.py" &&
+     -f "${source_root}/installer/easy-ha-proxy" &&
      -f "${source_root}/install-local.sh" ]] ||
     die "The current local source tree is unavailable; use --source-root DIR."
   source_channel="local"
 fi
 
 if [[ "${stage_install_source}" == true ]]; then
+  ensure_remote_stage_dir
   temporary_source_archive="$(mktemp -t easy-ha-proxy-source.XXXXXX.tgz)"
   build_source_archive "${source_root}" "${temporary_source_archive}"
   chmod 0600 "${temporary_source_archive}"
@@ -904,7 +926,7 @@ if [[ "${stage_install_source}" == true ]]; then
   stage_command+="test ! -e /etc/easy-ha-proxy; "
   stage_command+="install -d -m 0755 /opt/easy-ha-proxy/source; "
   stage_command+="tar -xzf ${remote_source_archive} -C /opt/easy-ha-proxy/source; "
-  stage_command+="test -f /opt/easy-ha-proxy/source/installer/easy_ha_proxy.py; "
+  stage_command+="test -f /opt/easy-ha-proxy/source/installer/easy-ha-proxy; "
   stage_command+="test -f /opt/easy-ha-proxy/source/ansible/easy-ha-proxy.yml; "
   stage_command+="chown -R root:root /opt/easy-ha-proxy/source"
   remote_command="if [ \"\$(id -u)\" -eq 0 ]; then sh -c '${stage_command}'; "
@@ -938,6 +960,7 @@ EOF
   fi
   [[ "${confirmation}" == "STAGE" ]] || die "Legacy staging cancelled."
 
+  ensure_remote_stage_dir
   temporary_source_archive="$(mktemp -t easy-ha-proxy-source.XXXXXX.tgz)"
   temporary_config_archive="$(mktemp -t easy-ha-proxy-config.XXXXXX.tgz)"
 
@@ -1008,6 +1031,7 @@ EOF
   fi
   [[ "${confirmation}" == "SYNC" ]] || die "Source synchronization cancelled."
 
+  ensure_remote_stage_dir
   temporary_source_archive="$(mktemp -t easy-ha-proxy-source.XXXXXX.tgz)"
   build_source_archive "${source_root}" "${temporary_source_archive}"
   chmod 0600 "${temporary_source_archive}"
@@ -1023,7 +1047,7 @@ EOF
   sync_command+="test ! -e ${next_source}; test ! -e ${backup_source}; "
   sync_command+="install -d -m 0755 ${next_source}; "
   sync_command+="tar -xzf ${remote_source_archive} -C ${next_source}; "
-  sync_command+="test -f ${next_source}/installer/easy_ha_proxy.py; "
+  sync_command+="test -f ${next_source}/installer/easy-ha-proxy; "
   sync_command+="test -f ${next_source}/ansible/easy-ha-proxy.yml; "
   sync_command+="chown -R root:root ${next_source}; "
   sync_command+="chmod 0755 ${next_source}/install.sh ${next_source}/install-local.sh "
@@ -1093,6 +1117,7 @@ EOF
       "${product}" >&2
   fi
 
+  ensure_remote_stage_dir
   temporary_source_archive="$(mktemp -t easy-ha-proxy-source.XXXXXX.tgz)"
   build_source_archive "${source_root}" "${temporary_source_archive}"
   chmod 0600 "${temporary_source_archive}"
@@ -1112,9 +1137,9 @@ EOF
   recovery_command+="test ! -e ${remote_recovery_root}; "
   recovery_command+="install -d -m 0700 ${remote_recovery_root}; "
   recovery_command+="tar -xzf ${remote_source_archive} -C ${remote_recovery_root}; "
-  recovery_command+="test -f ${remote_recovery_root}/installer/full_backup.py; "
-  recovery_command+="if test -x /opt/easy-ha-proxy/venv/bin/python && test -f /etc/easy-ha-proxy/metadata.yml; then "
-  recovery_command+="recovery_python=/opt/easy-ha-proxy/venv/bin/python; "
+  recovery_command+="test -f ${remote_recovery_root}/installer/easy-ha-proxy; "
+  recovery_command+="if test -f /etc/easy-ha-proxy/metadata.yml && "
+  recovery_command+="/usr/local/sbin/easy-ha-proxy-agent cli --probe >/dev/null 2>&1; then "
   recovery_command+="recovery_source=${remote_recovery_root}; "
   recovery_command+="else "
   recovery_command+="install -d -m 0755 /opt/easy-ha-proxy; "
@@ -1124,12 +1149,14 @@ EOF
   recovery_command+="chmod 0755 /opt/easy-ha-proxy/source; "
   recovery_command+="chmod 0700 ${remote_installer}; "
   recovery_command+="EASY_HA_PROXY_USE_EXISTING_SOURCE=true bash ${remote_installer} --prepare-only; "
-  recovery_command+="recovery_python=/opt/easy-ha-proxy/venv/bin/python; "
   recovery_command+="recovery_source=${remote_recovery_root}; "
   recovery_command+="fi; "
   recovery_command+="EASY_HA_PROXY_SOURCE_DIR=\${recovery_source} "
-  recovery_command+="\${recovery_python} \${recovery_source}/installer/easy_ha_proxy.py "
+  recovery_command+="bash \${recovery_source}/installer/easy-ha-proxy "
   recovery_command+="restore-full ${remote_restore_archive} --mode ${restore_mode} --apply"
+  if [[ "${allow_legacy_v1}" == true ]]; then
+    recovery_command+=" --allow-legacy-v1"
+  fi
   remote_command="if [ \"\$(id -u)\" -eq 0 ]; then sh -c '${recovery_command}'; "
   remote_command+="elif command -v sudo >/dev/null 2>&1; then sudo sh -c '${recovery_command}'; "
   remote_command+="else echo 'easy-ha-proxy: root or sudo is required' >&2; exit 1; fi"
@@ -1143,6 +1170,7 @@ EOF
 fi
 
 if [[ "${activate_current_source}" == true ]]; then
+  ensure_remote_stage_dir
   temporary_source_archive="$(mktemp -t easy-ha-proxy-source.XXXXXX.tgz)"
   build_source_archive "${source_root}" "${temporary_source_archive}"
   chmod 0600 "${temporary_source_archive}"
@@ -1160,7 +1188,7 @@ if [[ "${activate_current_source}" == true ]]; then
   sync_command+="test ! -e ${next_source}; test ! -e ${backup_source}; "
   sync_command+="install -d -m 0755 ${next_source}; "
   sync_command+="tar -xzf ${remote_source_archive} -C ${next_source}; "
-  sync_command+="test -f ${next_source}/installer/easy_ha_proxy.py; "
+  sync_command+="test -f ${next_source}/installer/easy-ha-proxy; "
   sync_command+="test -f ${next_source}/ansible/easy-ha-proxy.yml; "
   sync_command+="chown -R root:root ${next_source}; "
   sync_command+="chmod 0755 ${next_source}/install.sh ${next_source}/install-local.sh "
@@ -1182,6 +1210,7 @@ if [[ "${activate_current_source}" == true ]]; then
     "${product}" "${backup_source}"
 fi
 
+ensure_remote_stage_dir
 printf '[%s] Uploading installer to %s\n' "${product}" "${target}"
 scp "${scp_options[@]}" \
   "${temporary_installer}" \
@@ -1245,6 +1274,7 @@ reboot_scheduled="$(
 )"
 if [[ "${reboot_scheduled}" == "1" ]]; then
   wait_for_remote_reboot
+  remote_stage_dir=""
 fi
 
 snapshot_path="$(
@@ -1256,19 +1286,22 @@ if [[ -n "${snapshot_path}" && "${fetch_snapshot}" == true ]]; then
     die "Remote helper returned an unsafe snapshot path: ${snapshot_path}"
   fi
 
+  ensure_remote_stage_dir
   snapshot_name="${snapshot_path##*/}"
   local_snapshot_dir="${local_snapshot_root%/}/${snapshot_name}"
   local_export="${local_snapshot_dir}/legacy-export.tgz"
-  staged_remote_export="/tmp/easy-ha-proxy-${snapshot_name}-export.$$.tgz"
+  staged_remote_export="${remote_stage_dir}/${snapshot_name}-export.tgz"
 
-  install -d -m 0700 "${local_snapshot_root}" "${local_snapshot_dir}"
-  chmod 0700 "${local_snapshot_root}" "${local_snapshot_dir}"
+  install -d -m 0700 "${local_snapshot_root}"
+  mkdir -m 0700 -- "${local_snapshot_dir}" || die "Cannot create snapshot directory: ${local_snapshot_dir}"
   printf '[%s] Preparing protected snapshot export on %s\n' \
     "${product}" "${target}"
-  stage_command="sudo sh -c 'umask 077; "
-  stage_command+="tar -C ${snapshot_path} -czf ${staged_remote_export} "
-  stage_command+="live-config.tar.gz SHA256SUMS manifest.txt' && "
-  stage_command+="sudo chown \"\$(id -u):\$(id -g)\" ${staged_remote_export} && "
+  export_script="umask 077; tar -C ${snapshot_path} -czf ${staged_remote_export} "
+  export_script+="live-config.tar.gz SHA256SUMS manifest.txt"
+  stage_command="if [ \"\$(id -u)\" -eq 0 ]; then sh -c '${export_script}'; "
+  stage_command+="elif command -v sudo >/dev/null 2>&1; then sudo sh -c '${export_script}' && "
+  stage_command+="sudo chown \"\$(id -u):\$(id -g)\" ${staged_remote_export}; "
+  stage_command+="else echo 'easy-ha-proxy: root or sudo is required' >&2; exit 1; fi && "
   stage_command+="chmod 0600 ${staged_remote_export}"
   ssh -tt "${ssh_options[@]}" "${target}" "${stage_command}" <&"${input_fd}"
 
@@ -1282,7 +1315,12 @@ if [[ -n "${snapshot_path}" && "${fetch_snapshot}" == true ]]; then
     "rm -f ${staged_remote_export}" </dev/null || true
   staged_remote_export=""
 
-  tar -xzf "${local_export}" -C "${local_snapshot_dir}"
+  (
+    umask 077
+    for member in live-config.tar.gz SHA256SUMS manifest.txt; do
+      tar -xOzf "${local_export}" -- "${member}" >"${local_snapshot_dir}/${member}" || exit 1
+    done
+  ) || die 'Cannot extract the downloaded snapshot envelope.'
   expected_hash="$(
     awk 'NR == 1 { print $1 }' "${local_snapshot_dir}/SHA256SUMS"
   )"
@@ -1297,8 +1335,20 @@ if [[ -n "${snapshot_path}" && "${fetch_snapshot}" == true ]]; then
   live_dir="${local_snapshot_dir}/live"
   [[ ! -e "${live_dir}" ]] ||
     die "Refusing to overwrite existing extracted snapshot: ${live_dir}"
-  install -d -m 0700 "${live_dir}"
-  tar -xzf "${local_snapshot_dir}/live-config.tar.gz" -C "${live_dir}"
+  mkdir -m 0700 -- "${live_dir}"
+  # GNU tar passes only regular file contents to this fixed command. Create
+  # their parent directories locally, keeping archive metadata in the bundle.
+  SNAPSHOT_DEST="${live_dir}" tar -xzf "${local_snapshot_dir}/live-config.tar.gz" --to-command='
+    set -eC
+    umask 077
+    member=${TAR_FILENAME#./}
+    case "/${member}/" in
+      //*|*/../*|*/./*|*//*) exit 1 ;;
+    esac
+    path=${SNAPSHOT_DEST}/${member}
+    mkdir -p -- "$(dirname -- "${path}")"
+    cat >"${path}"
+  ' || die 'Cannot extract regular files from the downloaded snapshot.'
   printf '[%s] Snapshot verified and extracted: %s\n' \
     "${product}" "${live_dir}"
 elif [[ -n "${snapshot_path}" ]]; then
@@ -1313,17 +1363,21 @@ if [[ -n "${full_backup_path}" && "${fetch_snapshot}" == true ]]; then
   if [[ ! "${full_backup_path}" =~ ^/var/backups/easy-ha-proxy/full-[0-9TZ]+/easy-ha-proxy-full-[0-9TZ]+\.tar\.gz\.enc$ ]]; then
     die "Remote helper returned an unsafe full-backup path: ${full_backup_path}"
   fi
+  ensure_remote_stage_dir
   full_backup_name="${full_backup_path##*/}"
   full_backup_dir_name="${full_backup_path%/*}"
   full_backup_dir_name="${full_backup_dir_name##*/}"
   local_full_backup_dir="${local_snapshot_root%/}/${full_backup_dir_name}"
   local_full_backup="${local_full_backup_dir}/${full_backup_name}"
-  staged_remote_export="/tmp/${full_backup_name}.$$"
+  staged_remote_export="${remote_stage_dir}/${full_backup_name}"
   install -d -m 0700 "${local_snapshot_root}" "${local_full_backup_dir}"
   chmod 0700 "${local_snapshot_root}" "${local_full_backup_dir}"
-  stage_command="sudo cp ${full_backup_path} ${staged_remote_export} && "
-  stage_command+="sudo cp ${full_backup_path}.sha256 ${staged_remote_export}.sha256 && "
-  stage_command+="sudo chown \"\$(id -u):\$(id -g)\" ${staged_remote_export} ${staged_remote_export}.sha256 && "
+  copy_script="umask 077; cp ${full_backup_path} ${staged_remote_export} && "
+  copy_script+="cp ${full_backup_path}.sha256 ${staged_remote_export}.sha256"
+  stage_command="if [ \"\$(id -u)\" -eq 0 ]; then sh -c '${copy_script}'; "
+  stage_command+="elif command -v sudo >/dev/null 2>&1; then sudo sh -c '${copy_script}' && "
+  stage_command+="sudo chown \"\$(id -u):\$(id -g)\" ${staged_remote_export} ${staged_remote_export}.sha256; "
+  stage_command+="else echo 'easy-ha-proxy: root or sudo is required' >&2; exit 1; fi && "
   stage_command+="chmod 0600 ${staged_remote_export} ${staged_remote_export}.sha256"
   ssh -tt "${ssh_options[@]}" "${target}" "${stage_command}" <&"${input_fd}"
   scp "${scp_options[@]}" \

@@ -41,6 +41,8 @@ ansible/tcp.yml
 ansible/roles/cert/files/
 credentials/
 HIDE/
+# Test instructions for an AI tester, with the test stands' passwords: never published.
+TESTING_AI/
 .keys/
 **/.ssh/
 *id_rsa*
@@ -104,6 +106,8 @@ easy-ha-proxy-backups/
 *.mmdb
 *.mmdb.gz
 dump.rdb
+# The alertd upgrade contract fixture is a real 1.1.3 database, kept on purpose.
+!go/agent/internal/contract/testdata/alertd_python_1_1_3.db
 secrets.env
 credentials.env
 credentials.json
@@ -140,3 +144,4 @@ Thumbs.db
 
 # ESLint, installed by CI and by hand, never committed
 node_modules/
+.audit-alpha

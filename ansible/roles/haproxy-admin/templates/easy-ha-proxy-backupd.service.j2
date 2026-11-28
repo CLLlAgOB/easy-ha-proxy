@@ -7,7 +7,6 @@ Wants=network-online.target docker.service
 Type=simple
 User=root
 Group={{ app_group | default('hadmin') }}
-Environment="PYTHONUNBUFFERED=1"
 Environment="BACKUPD_SOCKET_PATH={{ backupd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-backupd.sock') }}"
 Environment="BACKUPD_ROOT_DIR={{ backupd_root_dir | default('/var/lib/easy-ha-proxy/backup-web') }}"
 Environment="BACKUPD_SOURCE_DIR={{ backupd_source_dir | default('/opt/easy-ha-proxy/source') }}"
@@ -29,10 +28,9 @@ Environment="BACKUPD_SERVICE_NAME=easy-ha-proxy-backupd.service"
 # Reporting to the alert engine is optional and best effort; without
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
-Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
+EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
 Environment="BACKUPD_DESTINATIONS_DIR={{ backupd_destinations_dir | default('/etc/easy-ha-proxy/backup-destinations') }}"
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', playbook_dir ~ '/roles/haproxy-admin/files/easy-ha-proxy-backupd.py', rstrip=false) | hash('sha256') }}"
-ExecStart=/usr/bin/python3 /usr/local/sbin/easy-ha-proxy-backupd.py
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} backupd
 Restart=always
 RestartSec=3
 TimeoutStopSec={{ (backupd_job_timeout_seconds | default(21600) | int) + 30 }}

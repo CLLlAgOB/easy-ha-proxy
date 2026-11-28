@@ -4,11 +4,9 @@ The state file preserves operator controls across reloads and restarts. It is
 not a backup of configuration: `show servers state` also contains transport
 overrides and DNS/health caches that can conflict with a new configuration.
 
-`installer/haproxy_server_state.py` is shared by periodic dumps, panel reload,
-cold start, package migration and rollback. The host installs the same source
-under `/usr/local/libexec/easy-ha-proxy/`.
-The update checker fingerprints this installed helper as a host-service
-component; a helper-only source change runs the `ha-cfg` deployment stage.
+The host agent normalizes the state for periodic dumps, panel reload and cold
+start (`easy-ha-proxy-agent server-state`, `go/agent/internal/tools/server_state.go`);
+the HAProxy package migration and rollback apply the same rules.
 
 | Fields | Restoration rule |
 | --- | --- |

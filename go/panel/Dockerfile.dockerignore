@@ -1,0 +1,17 @@
+**
+!VERSION
+!go/panel/go.mod
+!go/panel/go.sum
+!go/panel/cmd/
+!go/panel/cmd/**
+!go/panel/internal/
+!go/panel/internal/**
+!go/panel/shared/
+!go/panel/shared/**
+!go/panel/web/static/
+!go/panel/web/static/**
+!go/panel/web/translations/
+!go/panel/web/translations/**
+!go/panel/web/templates/
+!go/panel/web/templates/**
+go/panel/web/translations/README.md

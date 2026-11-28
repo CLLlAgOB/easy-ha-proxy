@@ -4,6 +4,8 @@ After=network-online.target haproxy.service
 Wants=network-online.target
 
 [Service]
+Environment="EASY_HA_PROXY_PANEL_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
+Environment="HAPROXY_DNS_CREDENTIALS_DIR={{ dns_credentials_dir | default('/etc/easy-ha-proxy/dns-providers') }}"
 Type=simple
 EnvironmentFile={{ haproxy_admin_env_file }}
 Environment="EASY_HA_PROXY_REBOOT_MARKER={{ maintenance_reboot_marker_path | default('/run/easy-ha-proxy/easy-ha-proxy-web-reboot.json') }}"
@@ -18,9 +20,8 @@ Environment="HAPROXY_ADMIN_ALLOWLIST_PATH={{ admin_ips_file | default('/etc/hapr
 # Reporting to the alert engine is optional and best effort; without
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
-Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-controld.py', rstrip=false) | hash('sha256') }}"
-ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-controld.py
+EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} controld
 Restart=always
 RestartSec=3
 User=root

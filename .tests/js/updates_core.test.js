@@ -7,7 +7,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
-const core = require(path.join(__dirname, "../../docker/app/haproxy_admin/static/js/updates_core.js"));
+const core = require(path.join(__dirname, "../../go/panel/web/static/js/updates_core.js"));
 
 test("live reboot state wins over a finished job and keeps manual reboot independent", () => {
   assert.equal(core.rebootState({reboot_required: false}, {result: {reboot_required: true}}).required, false);
@@ -344,4 +344,18 @@ test("the move to 3.4 shows the card only on a branch the plan found older", () 
   assert.equal(core.haproxyOnTarget(haproxy("current"), offer), true);
   assert.equal(core.haproxyAttention(null, {now: NOW, migration: offer}), false);
   assert.equal(core.haproxyOnTarget(haproxy("current", {branch: "2.8"}), offer), false);
+});
+
+test("completing a panel or HAProxy update triggers a page reload for fresh chrome", () => {
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "haproxy-transition", components: ["haproxy"]}), true);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "haproxy-migrate", components: ["haproxy"]}), true);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "apply", components: ["haproxy"]}), true);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "apply", components: ["admin-container"]}), true);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "apply", components: ["all"]}), true);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "apply"}, ["haproxy"]), true);
+  assert.equal(core.shouldReloadAfterJob({status: "failed", operation: "haproxy-transition", components: ["haproxy"]}), false);
+  assert.equal(core.shouldReloadAfterJob({status: "running", operation: "haproxy-transition", components: ["haproxy"]}), false);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "haproxy-prepare", components: ["haproxy"]}), false);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "apply", components: ["os"]}), false);
+  assert.equal(core.shouldReloadAfterJob({status: "completed", operation: "check", components: []}), false);
 });

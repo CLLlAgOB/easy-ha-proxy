@@ -4,13 +4,13 @@ Description=HAProxy certificate helper (root, Unix socket)
 After=network.target
 
 [Service]
+Environment="EASY_HA_PROXY_PANEL_SOCKET_USER={{ app_user | default('haproxyadmin') }}"
 Type=simple
 User=root
 Group={{ app_group }}
 # The daemon is self-contained and does not require a working directory.
 # WorkingDirectory=/opt/haproxy-admin
 
-Environment="PYTHONUNBUFFERED=1"
 Environment="HAPROXY_CERTD_DRY_RUN={{ haproxy_certd_dry_run | default('0') }}"
 Environment="HAPROXY_CERTD_SOCKET={{ certd_socket_path }}"
 Environment="HAPROXY_CERTD_SOCKET_GROUP={{ app_group }}"
@@ -25,10 +25,9 @@ Environment="HAPROXY_DNS_CREDENTIALS_DIR={{ dns_credentials_dir | default('/etc/
 # Reporting to the alert engine is optional and best effort; without
 # the token this daemon simply keeps its observations to itself.
 Environment="ALERTD_SOCKET_PATH={{ alertd_socket_path | default('/run/easy-ha-proxy/easy-ha-proxy-alertd.sock') }}"
-Environment="ALERTD_TOKEN={{ haproxy_admin_proxy_secret | default(authelia_session_secret | default('')) }}"
-Environment="EASY_HA_PROXY_DAEMON_VERSION={{ lookup('ansible.builtin.file', role_path ~ '/files/haproxy-certd.py', rstrip=false) | hash('sha256') }}"
+EnvironmentFile=-{{ daemons_env_file | default('/etc/easy-ha-proxy/daemons.env') }}
 
-ExecStart=/usr/bin/python3 /usr/local/sbin/haproxy-certd.py
+ExecStart={{ native_agent_bin | default('/usr/local/sbin/easy-ha-proxy-agent') }} certd
 
 Restart=always
 RestartSec=3

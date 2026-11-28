@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const core = require("../../docker/app/haproxy_admin/static/js/adaptive_core.js");
+const core = require("../../go/panel/web/static/js/adaptive_core.js");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
@@ -75,7 +75,7 @@ function page(fetch) {
   const document = {addEventListener() {}, querySelectorAll: () => [], createElement: element,
     getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }};
   const window = {EasyHaProxyAdaptive: core, EasyHaProxyTime: {formatter: () => ({format: (date) => String(date.getTime())})}};
-  const file = path.join(__dirname, "../../docker/app/haproxy_admin/static/js/adaptive_ban_detail.js");
+  const file = path.join(__dirname, "../../go/panel/web/static/js/adaptive_ban_detail.js");
   const source = fs.readFileSync(file, "utf8").replace(/\}\)\(\);\s*$/, "window.testView = {openBan};})();");
   vm.runInNewContext(source, {window, document, URLSearchParams, fetch});
   return {window, elements};
