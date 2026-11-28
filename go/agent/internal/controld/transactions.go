@@ -236,7 +236,12 @@ var (
 		"ssl-default-bind-ciphers": true, "ssl-default-bind-options": true, "localpeer": true, "lua-prepend-path": true,
 		"lua-load": true, "server-state-file": true}
 	policyCompatBlocks = map[string]string{".if version_atleast(3.1)": "tune.lua.bool-sample-conversion normal",
+		".if version_atleast(2.8)":    "tune.stick-counters 4",
 		".if !feature(OPENSSL_AWSLC)": "tune.ssl.default-dh-param 2048"}
+	policyRateCompatBlocks = map[string]*regexp.Regexp{
+		".if version_atleast(2.8)":  regexp.MustCompile(`^(http-request track-sc3 src table tbl_rate_\w+ if host_\w+ .+|acl rate_ban_\w+ src_http_req_rate\(tbl_rate_\w+\) gt [0-9]+)$`),
+		".if !version_atleast(2.8)": regexp.MustCompile(`^(http-request (track-sc2 src table tbl_rate_\w+|deny status 429) if host_\w+ .+|acl rate_ban_\w+ src_http_req_rate\(tbl_rate_\w+\) ge [0-9]+)$`),
+	}
 )
 
 func startsWithSpace(s string) bool {
@@ -256,9 +261,10 @@ func enforceConfigPolicy(raw []byte) error {
 	if err := utf8Check(raw); err != nil {
 		return err
 	}
-	inGlobal, sawGlobal := false, false
+	inGlobal, inHTTPS, sawGlobal := false, false, false
 	required := map[string]bool{"user": false, "group": false, "chroot": false}
 	conditionalBody, conditionalOpen, bodySeen := "", false, false
+	var rateRule *regexp.Regexp
 	for _, rawLine := range unfoldHAProxyLines(string(raw)) {
 		line := pyStrip(rawLine)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -277,16 +283,21 @@ func enforceConfigPolicy(raw []byte) error {
 				conditionalOpen, bodySeen = false, false
 				continue
 			}
-			if line != conditionalBody {
+			if line != conditionalBody && (rateRule == nil || !rateRule.MatchString(line)) {
 				return vErr("invalid HAProxy compatibility block body")
 			}
 			bodySeen = true
 		} else if strings.HasPrefix(token, ".") {
-			body, ok := policyCompatBlocks[line]
-			if !inGlobal || !startsWithSpace(rawLine) || !ok {
+			conditionalBody, rateRule = "", nil
+			if inGlobal {
+				conditionalBody = policyCompatBlocks[line]
+			} else if inHTTPS {
+				rateRule = policyRateCompatBlocks[line]
+			}
+			if !startsWithSpace(rawLine) || (conditionalBody == "" && rateRule == nil) {
 				return vErr("unapproved HAProxy conditional directive")
 			}
-			conditionalBody, conditionalOpen = body, true
+			conditionalOpen = true
 			continue
 		}
 		if policyForbidden[token] {
@@ -307,6 +318,7 @@ func enforceConfigPolicy(raw []byte) error {
 		}
 		if policySections[token] {
 			inGlobal = false
+			inHTTPS = token == "frontend" && len(parts) == 2 && parts[1] == "fe_https"
 			continue
 		}
 		if !inGlobal {

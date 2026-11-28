@@ -2,6 +2,7 @@ package stages
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,7 +15,7 @@ import (
 // regular file. On images where /var/log is root-owned 0755, rsyslog cannot
 // create it, and Docker creates a directory at the missing mount source,
 // leaving guardd and the Log Explorer without data. The fs stage keeps the
-// file syslog:adm 0640 and replaces an empty directory left at the path; a
+// file with mode 0640 and replaces an empty directory left at the path; a
 // filled one is refused. The steps run here in a temporary root, the owner
 // lookups standing in for syslog and adm as a root run would resolve them.
 
@@ -85,6 +86,22 @@ func TestAccessLogIsCreatedBeforeAnythingMountsIt(t *testing.T) {
 	}
 	if results[1].Status != "changed" {
 		t.Fatalf("the create was not reported: %+v", results)
+	}
+}
+
+func TestAccessLogCanBeCreatedWithoutSyslogUser(t *testing.T) {
+	f := newAccessLogFixture(t)
+	f.sys.LookupUser = func(name string) (int, error) {
+		if name != "root" {
+			return 0, user.UnknownUserError(name)
+		}
+		return os.Getuid(), nil
+	}
+	if _, err := f.run(engine.Apply); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(f.path()); err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o640 {
+		t.Fatalf("the access log was not created as a regular file with mode 0640: %v, %v", fi, err)
 	}
 }
 

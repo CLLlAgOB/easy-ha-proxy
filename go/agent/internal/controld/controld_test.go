@@ -35,6 +35,8 @@ func TestConfigPolicy(t *testing.T) {
 		strings.Replace(goodConfig, "    .endif\n", "", 1):                         "HAProxy compatibility block must stay inside global",
 		strings.Replace(goodConfig, "    .endif\n", "    .else\n", 1):              "invalid HAProxy compatibility block ending",
 		goodConfig + "global\n": "multiple global sections are not allowed",
+		goodConfig + "frontend fe_https\n    .if version_atleast(2.8)\n    timeout client 30s\n    .endif\n": "invalid HAProxy compatibility block body",
+		goodConfig + "backend other\n    .if version_atleast(2.8)\n    .endif\n":                             "unapproved HAProxy conditional directive",
 	}
 	for cfg, want := range cases {
 		if err := enforceConfigPolicy([]byte(cfg)); err == nil || err.Error() != want {
@@ -102,6 +104,7 @@ func TestConfigPolicyAcceptsTheRenderedTemplate(t *testing.T) {
 	rendered, err := env.Render("haproxy.cfg.j2", map[string]any{
 		"sites": []any{map[string]any{
 			"name": "site", "domain": "site.example.test", "backend_ip": "127.0.0.1", "backend_port": 8080,
+			"max_req_rate": int64(3), "rate_ban": true,
 		}},
 		"tcp_proxies": []any{}, "ansible_processor_vcpus": int64(1),
 	})

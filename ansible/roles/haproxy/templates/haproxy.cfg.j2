@@ -132,7 +132,9 @@ global
     tune.ssl.cachesize 10000
     tune.ssl.lifetime 3600
     tune.idle-pool.shared on
+    .if version_atleast(2.8)
     tune.stick-counters 4
+    .endif
 
     localpeer {{ localpeer }}
 
@@ -846,18 +848,33 @@ frontend fe_https
 {# A request-rate ceiling exists to slow down strangers. On a site only the
    named addresses can reach, it can only ever throttle the operator. #}
 {% if max_req_rate > 0 and not (s.allow_ips | default([])) %}
-    http-request track-sc3 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if u02 and authelia_enabled %} !ip_auth_ok{% endif %}
-
-    http-request set-var(txn._rate_tracked) bool(true) if host_{{ id }} !{ var(txn._rate_tracked) -m bool }
-
+{% set rate_ban = (s.rate_ban | default(false)) and not u02 %}
     acl too_fast_{{ id }} src_http_req_rate(tbl_rate_{{ id }}) gt {{ max_req_rate }}
 
-{% if s.rate_ban | default(false) and not u02 %}
-    http-request set-var(txn.ban_code)   int(30) if host_{{ id }} too_fast_{{ id }} !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+    .if version_atleast(2.8)
+    http-request track-sc3 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if u02 and authelia_enabled %} !ip_auth_ok{% endif %}
 
-    http-request set-var(txn.ban_reason) str("RATE_LIMIT_SITE name={{ s.name }} max_req_rate={{ max_req_rate }}") if host_{{ id }} too_fast_{{ id }} !{ var(txn.ban_reason) -m found } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+    .endif
+{% if rate_ban %}
+    .if version_atleast(2.8)
+    acl rate_ban_{{ id }} src_http_req_rate(tbl_rate_{{ id }}) gt {{ max_req_rate }}
+    .endif
+    # With three slots, decide the ban before counting this request so sc2
+    # is free for tbl_ban. A request at the limit would take it over.
+    .if !version_atleast(2.8)
+    acl rate_ban_{{ id }} src_http_req_rate(tbl_rate_{{ id }}) ge {{ max_req_rate }}
+    .endif
+
+    http-request set-var(txn.ban_code)   int(30) if host_{{ id }} rate_ban_{{ id }} !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
+
+    http-request set-var(txn.ban_reason) str("RATE_LIMIT_SITE name={{ s.name }} max_req_rate={{ max_req_rate }}") if host_{{ id }} rate_ban_{{ id }} !{ var(txn.ban_reason) -m found } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}
 
 {% endif %}
+    .if !version_atleast(2.8)
+    http-request track-sc2 src table tbl_rate_{{ id }} if host_{{ id }} !{ var(txn._rate_tracked) -m bool } !{ var(txn.ban_code) -m int gt 0 } !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if u02 and authelia_enabled %} !ip_auth_ok{% endif %}
+
+    .endif
+    http-request set-var(txn._rate_tracked) bool(true) if host_{{ id }} !{ var(txn._rate_tracked) -m bool }
 
 {% endif %}
 {% endfor %}
@@ -911,9 +928,17 @@ frontend fe_https
 {% set s = sd | combine(site, recursive=True) %}
 {% set id = sanitize(s.name) %}
 {% set max_req_rate = (s.max_req_rate | default(0)) | int %}
-{% if max_req_rate > 0 and (u02 or not (s.rate_ban | default(false))) and not (s.allow_ips | default([])) %}
+{% if max_req_rate > 0 and not (s.allow_ips | default([])) %}
+{% set rate_ban = (s.rate_ban | default(false)) and not u02 %}
+{% if rate_ban %}
+    .if !version_atleast(2.8)
+    # The rate may have crossed the threshold concurrently since the ban check.
+{% endif %}
     http-request deny status 429 if host_{{ id }} too_fast_{{ id }} !ip_whitelist{% if admin_ips_enabled %} !allowed_admin{% endif %}{% if u02 and authelia_enabled %} !ip_auth_ok{% endif %}
 
+{% if rate_ban %}
+    .endif
+{% endif %}
 {% endif %}
 {% endfor %}
 {% if u02 %}

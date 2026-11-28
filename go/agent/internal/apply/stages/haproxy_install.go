@@ -226,6 +226,8 @@ func haproxyInstall(b *Builder) []engine.Step {
 			Resource: &engine.Group{Name: b.S("{{ haproxy_socket_group }}"), System: true}},
 	}
 	steps = append(steps, withTags(haproxyPackage(b), "install", "restore-network")...)
+	steps = append(steps, engine.Step{Name: "Install rsyslog before preparing HAProxy logs", Tags: []string{"install", "restore-network"},
+		Resource: &engine.AptInstall{Names: []string{"rsyslog"}, UpdateCache: true, CacheValid: b.aptValid()}})
 	steps = append(steps, haproxyFS(b)...)
 	steps = append(steps, engine.Step{Name: "Validate HAProxy config if present", Tags: install,
 		Resource: &engine.Command{Argv: []string{"haproxy", "-c", "-f", "/etc/haproxy/haproxy.cfg"}, IgnoreErrors: true}})

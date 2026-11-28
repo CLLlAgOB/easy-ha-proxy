@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 
 	"easy-ha-proxy/panel/shared/pyyaml"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/engine"
@@ -85,16 +86,28 @@ func haproxyFS(b *Builder) []engine.Step {
 	for _, d := range []struct{ path, owner, group string }{
 		{"/etc/haproxy", "root", "root"},
 		{"/var/lib/haproxy", "root", "root"},
-		{"/var/log/haproxy", "syslog", "adm"},
 	} {
 		steps = append(steps, engine.Step{Name: "Ensure HAProxy base dirs exist", Resource: b.Dir(d.path, d.owner, d.group, "0755")})
 	}
+	// Ubuntu's rsyslog drops privileges to syslog. Debian's service uses root
+	// and its package does not require a syslog account.
+	logOwner := func(r *engine.Run) (string, error) {
+		_, err := r.Sys.LookupUser("syslog")
+		var missing user.UnknownUserError
+		if errors.As(err, &missing) {
+			return "root", nil
+		}
+		return "syslog", err
+	}
+	steps = append(steps, engine.Step{Name: "Ensure HAProxy base dirs exist", Build: func(r *engine.Run) (engine.Resource, error) {
+		owner, err := logOwner(r)
+		return b.Dir("/var/log/haproxy", owner, "adm", "0755"), err
+	}})
 	// On images where /var/log is root-owned 0755, rsyslog cannot create the
 	// access log itself, and the panel compose bind mount of the missing file
 	// creates a directory in its place, leaving guardd and the Log Explorer
-	// without their source. Keep the file rsyslog writes (syslog:adm 0640, as
-	// rsyslog creates it) before anything mounts it; an empty directory left
-	// at the path is replaced, a filled one is refused.
+	// without their source. Prepare the log with adm group access before
+	// anything mounts it. Replace an empty directory and refuse a filled one.
 	const logPath = "/var/log/haproxy.log"
 	steps = append(steps,
 		engine.Step{Name: "Replace an empty directory at the HAProxy access log path",
@@ -118,7 +131,10 @@ func haproxyFS(b *Builder) []engine.Step {
 				},
 				ApplyFn: func(sys *engine.System) error { return os.Remove(sys.Path(logPath)) }}},
 		engine.Step{Name: "Ensure the HAProxy access log exists for rsyslog and the panel",
-			Resource: &engine.Touch{Path: logPath, Owner: "syslog", Group: "adm", Mode: 0o640, Preserve: true}},
+			Build: func(r *engine.Run) (engine.Resource, error) {
+				owner, err := logOwner(r)
+				return &engine.Touch{Path: logPath, Owner: owner, Group: "adm", Mode: 0o640, Preserve: true}, err
+			}},
 	)
 	return append(steps,
 		engine.Step{Name: "Ensure HAProxy errors directory exists", Resource: b.Dir("/etc/haproxy/errors", "root", "root", "0755")},
