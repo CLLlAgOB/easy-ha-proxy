@@ -24,8 +24,7 @@ import (
 )
 
 const (
-	DefaultVendorURL = "https://www.haproxy.com/download/haproxy/performance/ubuntu/ha34/"
-	DefaultKeyURL    = "https://pks.haproxy.com/linux/community/RPM-GPG-KEY-HAProxy"
+	DefaultKeyURL = "https://pks.haproxy.com/linux/community/RPM-GPG-KEY-HAProxy"
 )
 
 // MigrationError represents a controlled refusal or failure during migration.
@@ -128,7 +127,9 @@ var (
 	}
 	optionalDependencies = map[string]bool{
 		"libjemalloc2":                 true,
+		"liblua5.4-0":                  true,
 		"libopentracing1":              true,
+		"libopentracing-c-wrapper0":    true,
 		"libopentracing-c-wrapper0t64": true,
 	}
 	allowedPackages = map[string]bool{
@@ -136,7 +137,9 @@ var (
 		"haproxy-awslc":                true,
 		"libssl-awslc":                 true,
 		"libjemalloc2":                 true,
+		"liblua5.4-0":                  true,
 		"libopentracing1":              true,
+		"libopentracing-c-wrapper0":    true,
 		"libopentracing-c-wrapper0t64": true,
 	}
 )
@@ -167,7 +170,7 @@ type Host interface {
 	Machine() (string, error)
 	WorkerDigest(pid string) (string, error)
 	StartSeed(directory, unit string) error
-	Watchdog(directory, unit string) error
+	Watchdog(directory, unit, recoveryBinary string) error
 	CancelWatchdog(unit string)
 	ControlJournal(defaultPath string) (string, error)
 	GuardDatabase() (string, error)
@@ -352,12 +355,12 @@ func (h *SystemHost) StartSeed(directory, unit string) error {
 	return err
 }
 
-func (h *SystemHost) Watchdog(directory, unit string) error {
+func (h *SystemHost) Watchdog(directory, unit, recoveryBinary string) error {
 	argv := []string{
 		"/usr/bin/systemd-run", "--quiet", "--collect", "--unit=" + unit,
 		"--on-active=300s", "--timer-property=AccuracySec=1s",
 		"--property=Restart=on-failure", "--property=RestartSec=10s",
-		filepath.Join(directory, "recover-agent"), "haproxy-migrate", "recover", "--id", filepath.Base(directory),
+		filepath.Join(directory, recoveryBinary), "haproxy-migrate", "recover", "--id", filepath.Base(directory),
 	}
 	_, err := h.Command(argv, CmdOpts{Check: true})
 	return err

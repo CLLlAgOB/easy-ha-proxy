@@ -18,6 +18,7 @@ type versionFixture struct {
 	held, remote, qualifiedHost         bool
 	runtime, metadata                   M
 	runtimeErr                          error
+	release                             string
 	lastUpdate, lastMigration           string
 	calls                               [][]string
 }
@@ -71,6 +72,9 @@ func (f *versionFixture) probe() M {
 	if !f.qualifiedHost {
 		release = "ID=debian\nVERSION_ID=\"13\"\n"
 	}
+	if f.release != "" {
+		release = f.release
+	}
 	writeFile(f.t, f.osRelease, release)
 	osReleasePath = f.osRelease
 	machine = func() string { return "aarch64" }
@@ -107,6 +111,23 @@ func TestAPatchIsOfferedButABranchJumpAndDowngradeAreBlocked(t *testing.T) {
 		f.candidate = version
 		if got := f.probe()["state"]; got != want {
 			t.Fatalf("%s: %v", version, got)
+		}
+	}
+}
+
+func TestBookwormUsesItsOwnDistributionAndVendorBranches(t *testing.T) {
+	f := newVersionFixture(t)
+	f.release = "ID=debian\nVERSION_ID=12\nVERSION_CODENAME=bookworm\n"
+	for _, tc := range []struct{ pkg, installed, candidate, want string }{
+		{"haproxy", "2.6.12-1+deb12u3", "2.6.12-1+deb12u4", "available"},
+		{"haproxy-awslc", "3.2.27-1", "3.2.28-1", "available"},
+		{"haproxy-awslc", "3.2.27-1", "3.4.9-1", "blocked"},
+	} {
+		f.pkg, f.installed, f.candidate = tc.pkg, tc.installed, tc.candidate
+		f.runtime["running_version"] = f.installed
+		got := f.probe()
+		if got["state"] != tc.want || details(got)["migration_target_branch"] != "3.2" {
+			t.Fatalf("%+v: %v", tc, got)
 		}
 	}
 }

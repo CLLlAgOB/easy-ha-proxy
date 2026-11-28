@@ -2,7 +2,6 @@ package stages
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"easy-ha-proxy/panel/shared/pyyaml"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/engine"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/apply/facts"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxypkg"
 )
 
 // The handlers roles/haproxy's tasks notify. During the hybrid period the
@@ -73,29 +73,6 @@ func haproxyAppArmor(b *Builder) []engine.Step {
 	}
 }
 
-// haproxyPin is the copy task's content:, word for word.
-const haproxyPin = `# Only the explicitly selected HAProxy branch may be installed.
-Package: haproxy-awslc
-Pin: version {{ haproxy_package_branch }}.*
-Pin-Priority: 990
-
-Package: haproxy-awslc
-Pin: version *
-Pin-Priority: -1
-
-# A distribution update must not replace this provider implicitly.
-Package: haproxy
-Pin: version *
-Pin-Priority: -1
-
-# Do not let this extra repository replace unrelated system packages.
-Package: *
-Pin: origin "www.haproxy.com"
-Pin-Priority: 100
-`
-
-var haproxyVersion34 = regexp.MustCompile(`HAProxy version 3[.]4[.]`)
-
 // aptValid is the play's module_defaults cache_valid_time for apt tasks.
 func (b *Builder) aptValid() time.Duration {
 	n, err := strconv.Atoi(b.S("{{ easy_ha_proxy_apt_cache_valid_time | default(3600) }}"))
@@ -110,6 +87,10 @@ func (b *Builder) aptValid() time.Duration {
 func haproxyPackage(b *Builder) []engine.Step {
 	provider := b.S("{{ haproxy_package_provider }}")
 	branch := b.S("{{ haproxy_package_branch }}")
+	platform := haproxypkg.ForOS(b.S("{{ ansible_distribution }}"), b.S("{{ ansible_distribution_release }}"), b.S("{{ ansible_architecture }}"))
+	if branch == "" {
+		branch = platform.Target
+	}
 	valid := b.aptValid()
 	var packages *pyyaml.Map
 	installed := func(name string) bool {
@@ -127,11 +108,6 @@ func haproxyPackage(b *Builder) []engine.Step {
 		return ""
 	}
 	tech := func(*engine.Run) bool { return provider == "haproxy-technologies" }
-	arch := b.S("{{ ansible_architecture }}")
-	repoArch := "amd64"
-	if arch == "aarch64" {
-		repoArch = "arm64"
-	}
 	steps := []engine.Step{
 		assertStep("HAProxy package | Validate the provider",
 			func(*engine.Run) bool { return provider == "distribution" || provider == "haproxy-technologies" },
@@ -152,11 +128,10 @@ func haproxyPackage(b *Builder) []engine.Step {
 	}
 	block := []engine.Step{
 		assertStep("HAProxy package | Validate the platform before changing APT", func(*engine.Run) bool {
-			return b.S("{{ ansible_distribution }}") == "Ubuntu" && b.S("{{ ansible_distribution_release }}") == "noble" &&
-				(arch == "aarch64" || arch == "x86_64") && branch == "3.4" &&
-				(!installed("haproxy-awslc") || strings.HasPrefix(version("haproxy-awslc"), "3.4."))
-		}, "The HAProxy Technologies provider is qualified for Ubuntu 24.04 noble, ARM64 and AMD64, branch 3.4 only. "+
-			"Other platforms keep the distribution provider until they are explicitly qualified. An installed package from "+
+			return platform.Target != "" && branch == platform.Target &&
+				(!installed("haproxy-awslc") || strings.HasPrefix(version("haproxy-awslc"), branch+"."))
+		}, "The HAProxy Technologies provider requires HAProxy 3.4 on Ubuntu 24.04 or HAProxy 3.2 on Debian 12 (AMD64 or ARM64). "+
+			"An installed package from "+
 			"another branch must use a separate migration procedure."),
 		{Name: "HAProxy package | Install repository prerequisites",
 			Resource: &engine.AptInstall{Names: []string{"ca-certificates"}, UpdateCache: true, CacheValid: valid}},
@@ -166,15 +141,14 @@ func haproxyPackage(b *Builder) []engine.Step {
 				Dest: "/usr/share/keyrings/easy-ha-proxy-haproxy-community.asc", SHA256: b.S("{{ haproxy_community_key_sha256 }}"),
 				Owner: "root", Group: "root", Mode: 0o644}},
 		{Name: "HAProxy package | Keep package updates within the selected branch", Register: "haproxy_package_pin",
-			Build: b.CopyContent(haproxyPin, "/etc/apt/preferences.d/easy-ha-proxy-haproxy", "root", "root", "0644")},
+			Build: b.CopyContent(haproxypkg.Pin(branch), "/etc/apt/preferences.d/easy-ha-proxy-haproxy", "root", "root", "0644")},
 		{Name: "HAProxy package | Add the architecture-specific signed repository", Register: "haproxy_package_repository",
 			Resource: &engine.AptRepository{File: "easy-ha-proxy-haproxy", Mode: 0o644,
-				Line: "deb [arch=" + repoArch + " signed-by=/usr/share/keyrings/easy-ha-proxy-haproxy-community.asc] " +
-					"https://www.haproxy.com/download/haproxy/performance/ubuntu/ha34 noble main"}},
+				Line: platform.SourceLine("/usr/share/keyrings/easy-ha-proxy-haproxy-community.asc")}},
 		{Name: "HAProxy package | Refresh APT after repository changes",
 			When:     Changed("haproxy_package_key", "haproxy_package_pin", "haproxy_package_repository"),
 			Resource: &engine.AptCache{ValidTime: 0}},
-		{Name: "HAProxy package | Install the selected 3.4 package without starting services",
+		{Name: "HAProxy package | Install the selected package without starting services",
 			When: func(*engine.Run) bool { return !installed("haproxy-awslc") },
 			Resource: &engine.AptInstall{Names: []string{"haproxy-awslc=" + branch + ".*"}, PolicyRcD: 101,
 				UpdateCache: true, CacheValid: time.Hour}},
@@ -184,10 +158,10 @@ func haproxyPackage(b *Builder) []engine.Step {
 				if err != nil {
 					return engine.Change{}, err
 				}
-				if code != 0 || !haproxyVersion34.MatchString(out) {
-					return engine.Change{}, fmt.Errorf("haproxy -v: exit %d, not HAProxy 3.4", code)
+				if code != 0 || !strings.HasPrefix(out, "HAProxy version "+branch+".") {
+					return engine.Change{}, fmt.Errorf("haproxy -v: exit %d, expected HAProxy %s", code, branch)
 				}
-				return engine.Change{Summary: "3.4"}, nil
+				return engine.Change{Summary: branch}, nil
 			}}},
 	}
 	for i := range block {

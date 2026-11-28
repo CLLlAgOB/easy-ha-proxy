@@ -428,7 +428,7 @@
       return {percent: null, label: t(labels[jobOperation(job)] || "OS security"), step: t(PHASE_LABELS[progress.phase] || ""), eta: ""};
     }
     if (["haproxy-prepare", "haproxy-migrate", "haproxy-transition"].includes(jobOperation(job))) {
-      return {percent: null, label: t(jobOperation(job) === "haproxy-prepare" ? "Preparing the HAProxy transition…" : "Switching HAProxy to 3.4 LTS…"),
+      return {percent: null, label: t(jobOperation(job) === "haproxy-prepare" ? "Preparing the HAProxy transition…" : "Switching HAProxy…"),
         step: t(PHASE_LABELS[progress.phase] || ""), eta: ""};
     }
     if (jobOperation(job) !== "apply") {
@@ -492,15 +492,16 @@
 
   // Whether the gateway already runs the branch the transition leads to. The
   // broker's own "current" falls back to the last operation once its plan
-  // expires, and a gateway installed on 3.4 has no such operation, so the
+  // expires, and a gateway installed directly on the target has no operation, so the
   // branch the plan saw counts as well.
   function haproxyOnTarget(component, migration) {
-    return migration?.automatic?.current === true || component?.details?.branch === "3.4";
+    const target = migration?.target_branch ?? component?.details?.migration_target_branch ?? "3.4";
+    return migration?.automatic?.current === true || (Boolean(target) && component?.details?.branch === target);
   }
 
   // Whether the HAProxy card has anything to show. "current" is the one
   // state with nothing to do or to look at, and before the first check
-  // there is nothing to say about HAProxy either. The offer of 3.4 counts
+  // there is nothing to say about HAProxy either. The migration offer counts
   // only on a branch the plan saw and found older.
   function haproxyAttention(component, {operation = null, migration = null, now = Date.now() / 1000} = {}) {
     const details = component?.details || {};

@@ -211,8 +211,7 @@
     if (value === "check") return t("Update check");
     if (value === "apply") return t("Install updates");
     if (value === "haproxy-prepare") return t("Prepare HAProxy migration");
-    if (value === "haproxy-migrate") return t("Migrate HAProxy to 3.4 LTS");
-    if (value === "haproxy-transition") return t("Migrate HAProxy to 3.4 LTS");
+    if (value === "haproxy-migrate" || value === "haproxy-transition") return t("HAProxy transition");
     return t(value || "—");
   }
 
@@ -457,6 +456,7 @@
 
   function renderMigration() {
     const automatic = currentMigration?.automatic;
+    const target = currentMigration?.target_branch;
     const onTarget = core.haproxyOnTarget(haproxyComponent, currentMigration);
     showHaproxyCard();
     if (!byId("updates-migration")) return;
@@ -466,18 +466,22 @@
     state.hidden = automatic?.can_start === true;
     byId("updates-migration-description").hidden = onTarget;
     const button = byId("updates-migration-start");
+    byId("updates-migration-title").textContent = target
+      ? t("Transition to HAProxy %s LTS").replace("%s", target) : t("HAProxy transition");
+    button.textContent = target ? t("Switch to HAProxy %s LTS").replace("%s", target) : t("Switch HAProxy");
     button.hidden = onTarget;
-    button.disabled = requestRunning || operationRunning || Boolean(pendingStart) || automatic?.can_start !== true;
+    button.disabled = requestRunning || operationRunning || Boolean(pendingStart) || !target || automatic?.can_start !== true;
   }
 
   async function startMigration() {
-    if (requestRunning || operationRunning || pendingStart || !currentMigration?.automatic?.can_start) return;
-    if (!window.confirm(t("Switch to HAProxy 3.4 LTS? Connections may need to reconnect."))) return;
+    const target = currentMigration?.target_branch;
+    if (requestRunning || operationRunning || pendingStart || !target || !currentMigration?.automatic?.can_start) return;
+    if (!window.confirm(t("Switch to HAProxy %s LTS? Connections may need to reconnect.").replace("%s", target))) return;
     const operation = "haproxy-transition";
     setBusy(true);
     beginPendingStart(operation, ["haproxy"], "");
     try {
-      const payload = await postJson(endpoints.migrationStart, {target_branch: "3.4", confirmed: true});
+      const payload = await postJson(endpoints.migrationStart, {target_branch: target, confirmed: true});
       currentJobId = String(payload.job_id || "");
       currentJobOperation = operation;
       currentApplyComponents = ["haproxy"];
