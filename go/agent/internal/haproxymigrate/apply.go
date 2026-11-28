@@ -7,15 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxypkg"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/tools"
 	"gopkg.in/yaml.v3"
 )
@@ -473,7 +476,35 @@ func (e *Engine) units() (string, string) {
 	return "easy-ha-proxy-haproxy-seed-" + suffix, "easy-ha-proxy-haproxy-watchdog-" + suffix
 }
 
+func (e *Engine) recoveryCommand() (string, string) {
+	if digest := strVal(e.State["rollback_engine_digest"]); e.State["operation"] == "rollback" && digest != "" {
+		return "rollback-agent", digest
+	}
+	return "recover-agent", strVal(e.State["engine_digest"])
+}
+
 func (e *Engine) arm(operation string) error {
+	if operation == "rollback" {
+		exe, err := engineBinaryFunc()
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(exe)
+		if err != nil {
+			return err
+		}
+		digest := bytesDigest(data)
+		if digest != strVal(e.State["engine_digest"]) {
+			// Use the same rollback implementation for the watchdog as for
+			// the operator, keeping the original migration artifact intact.
+			if err := atomicWrite(filepath.Join(e.Directory, "rollback-agent"), data, 0o700, 0, 0); err != nil {
+				return err
+			}
+			e.State["rollback_engine_digest"] = digest
+		} else {
+			delete(e.State, "rollback_engine_digest")
+		}
+	}
 	e.State["operation"] = operation
 	e.State["seed_ready"] = false
 	e.State["config_modified"] = false
@@ -483,7 +514,8 @@ func (e *Engine) arm(operation string) error {
 		return err
 	}
 	_, watchdog := e.units()
-	return e.Host.Watchdog(e.Directory, watchdog)
+	recoveryBinary, _ := e.recoveryCommand()
+	return e.Host.Watchdog(e.Directory, watchdog, recoveryBinary)
 }
 
 func (e *Engine) abortDowngrade() error {
@@ -569,25 +601,16 @@ func (e *Engine) repositoryFiles() error {
 	if e.Patch {
 		return nil
 	}
-	repo := fmt.Sprintf("deb [arch=%s signed-by=%s] %s noble main\n",
-		strVal(e.State["architecture"]), e.Paths.SigningKey, strings.TrimRight(e.Vendor, "/"))
-	priorities := `Package: haproxy-awslc
-Pin: version 3.4.*
-Pin-Priority: 990
-
-Package: haproxy-awslc
-Pin: version *
-Pin-Priority: -1
-
-Package: haproxy
-Pin: version *
-Pin-Priority: -1
-
-Package: *
-Pin: origin "www.haproxy.com"
-Pin-Priority: 100
-`
-	if err := e.put(e.Paths.Repository, []byte(repo), 0o644, 0, 0); err != nil {
+	p := haproxypkg.ReadPlatform(osReleasePath, strVal(e.State["architecture"]))
+	if p.Target != e.migrationBranch() {
+		return migErr("The prepared migration does not match the host platform")
+	}
+	repo := p.SourceLine(e.Paths.SigningKey)
+	if e.Vendor != "" {
+		repo = strings.Replace(repo, p.Repository(), strings.TrimRight(e.Vendor, "/"), 1)
+	}
+	priorities := haproxypkg.Pin(p.Target)
+	if err := e.put(e.Paths.Repository, []byte(repo+"\n"), 0o644, 0, 0); err != nil {
 		return err
 	}
 	if err := e.put(e.Paths.Priorities, []byte(priorities), 0o644, 0, 0); err != nil {
@@ -755,6 +778,27 @@ func (e *Engine) oldRuntimeVersion() string {
 	return strVal(e.State["old_version"])
 }
 
+func (e *Engine) masterUsesRemovedConfigDir() bool {
+	if _, err := os.Stat(haproxyConfD); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	pid, err := e.Host.MainPID()
+	if err != nil {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return false
+	}
+	args := strings.Split(string(raw), "\x00")
+	for i := 1; i < len(args); i++ {
+		if args[i-1] == "-f" && args[i] == haproxyConfD {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) rollbackLocked() error {
 	if err := e.save("rolling_back"); err != nil {
 		return err
@@ -813,7 +857,13 @@ func (e *Engine) rollbackLocked() error {
 	if err := e.storeServers(); err != nil {
 		return err
 	}
-	if !e.Host.Active("haproxy.service") {
+	// A master started under the vendor unit can retain "-f conf.d" across
+	// reloads. Its package removes that directory during a provider rollback.
+	// Start with the restored unit while the seed is still serving the tables.
+	if !e.Host.Active("haproxy.service") || (!e.Patch && e.masterUsesRemovedConfigDir()) {
+		if _, err := e.Host.Command([]string{e.Paths.Binary, "-Ws", "-c", "-f", e.Paths.Config}, CmdOpts{Check: true}); err != nil {
+			return err
+		}
 		if err := e.Host.Service("restart", "haproxy.service"); err != nil {
 			return err
 		}
@@ -875,6 +925,91 @@ func updateVarsYAML(original []byte, updates [][2]string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+func (e *Engine) migrationBranch() string {
+	if branch := strVal(e.State["target_branch"]); branch != "" {
+		return branch
+	}
+	// Older transactions only targeted Ubuntu 3.4.
+	return "3.4"
+}
+
+func (e *Engine) migrationVariables(original []byte) ([]byte, error) {
+	return updateVarsYAML(original, [][2]string{
+		{"haproxy_package_provider", "haproxy-technologies"},
+		{"haproxy_package_branch", e.migrationBranch()},
+	})
+}
+
+func parseVariables(raw []byte) (map[string]any, bool) {
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	var variables map[string]any
+	if decoder.Decode(&variables) != nil || variables == nil {
+		return nil, false
+	}
+	return variables, decoder.Decode(new(yaml.Node)) == io.EOF
+}
+
+func (e *Engine) committedVariablesDigest() string {
+	if isSymlink(e.Paths.Variables) {
+		return ""
+	}
+	actual, err := os.ReadFile(e.Paths.Variables)
+	if err != nil {
+		return ""
+	}
+	digest := strVal(e.State["committed_vars_digest"])
+	current := bytesDigest(actual)
+	if current == digest {
+		return current
+	}
+	// The installer can serialize the same values differently. Reconstruct
+	// the committed document from its verified backup before comparing values.
+	original, err := e.original(e.Paths.Variables)
+	if err != nil {
+		return ""
+	}
+	expected, err := e.migrationVariables(original)
+	if err != nil || bytesDigest(expected) != digest {
+		return ""
+	}
+	want, wantOK := parseVariables(expected)
+	got, gotOK := parseVariables(actual)
+	if wantOK && gotOK && reflect.DeepEqual(want, got) {
+		return current
+	}
+	return ""
+}
+
+func (e *Engine) committedRepositoryFileDigest(path, digest string) string {
+	if isSymlink(path) {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	current := bytesDigest(data)
+	if current == digest {
+		return current
+	}
+	// Older migrations wrote the same pin without the installer's comments.
+	if path != e.Paths.Priorities || e.migrationBranch() != "3.4" {
+		return ""
+	}
+	canonical := haproxypkg.Pin("3.4")
+	lines := strings.Split(canonical, "\n")
+	legacy := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "#") {
+			legacy = append(legacy, line)
+		}
+	}
+	if current == bytesDigest([]byte(canonical)) && digest == bytesDigest([]byte(strings.Join(legacy, "\n"))) {
+		return current
+	}
+	return ""
+}
+
 // Migrate refreshes APT metadata, prepares, and applies a migration under a single lock.
 func (e *Engine) Migrate(exerciseRollback bool) (map[string]any, error) {
 	var summary map[string]any
@@ -903,7 +1038,7 @@ func (e *Engine) Apply(identifier string, exerciseRollback bool) (map[string]any
 		if strVal(e.State["phase"]) != "prepared" {
 			return migErr("Apply requires a freshly prepared transaction")
 		}
-		if err := e.checkArtifacts(); err != nil {
+		if err := e.checkArtifacts(true); err != nil {
 			return err
 		}
 		if err := e.unchangedServiceDropins(); err != nil {
@@ -1033,10 +1168,7 @@ func (e *Engine) Apply(identifier string, exerciseRollback bool) (map[string]any
 				if err != nil {
 					return err
 				}
-				updated, err := updateVarsYAML(origVars, [][2]string{
-					{"haproxy_package_provider", "haproxy-technologies"},
-					{"haproxy_package_branch", "3.4"},
-				})
+				updated, err := e.migrationVariables(origVars)
 				if err != nil {
 					return err
 				}
@@ -1134,17 +1266,34 @@ func (e *Engine) committedUnchanged() error {
 	if d, err := fileDigest(e.Paths.Config); err != nil || d != strVal(cfgRec["digest"]) {
 		return migErr("Configuration changed since migration; qualify a fresh downgrade")
 	}
-	if d, err := fileDigest(e.Paths.Variables); err != nil || d != strVal(e.State["committed_vars_digest"]) {
+	varsDigest := e.committedVariablesDigest()
+	if varsDigest == "" {
 		return migErr("Installer variables changed since migration; qualify a fresh downgrade")
 	}
+	verified := map[string]string{e.Paths.Variables: varsDigest}
 	if repoDigs, ok := e.State["committed_repository_digests"].(map[string]any); ok {
 		for p, exp := range repoDigs {
-			if d, err := fileDigest(p); err != nil || d != strVal(exp) {
+			digest := e.committedRepositoryFileDigest(p, strVal(exp))
+			if digest == "" {
 				return migErr("Repository configuration changed since migration")
 			}
+			verified[p] = digest
 		}
 	}
-	return e.unchanged(e.Paths.Policy)
+	if err := e.unchanged(e.Paths.Policy); err != nil {
+		return err
+	}
+	// Authorize only the exact bytes already verified above. Persist them with
+	// the rollback journal so the saved watchdog can restore the same files.
+	written, _ := e.State["written_files"].(map[string]any)
+	if written == nil {
+		written = map[string]any{}
+		e.State["written_files"] = written
+	}
+	for path, digest := range verified {
+		written[path] = digest
+	}
+	return nil
 }
 
 // Rollback manually rolls back a committed transaction while source files remain unchanged.
@@ -1169,7 +1318,9 @@ func (e *Engine) Rollback(identifier string) (map[string]any, error) {
 		if err != nil || curInfo["Version"] != strVal(e.State["target_runtime_version"]) {
 			return migErr("The target was upgraded since this transaction; qualify a fresh downgrade")
 		}
-		if err := e.checkArtifacts(); err != nil {
+		// A later agent can roll back a committed transaction in the supported
+		// journal format. The watchdog still uses the verified saved binary.
+		if err := e.checkArtifacts(false); err != nil {
 			return err
 		}
 		if err := e.Health(); err != nil {
@@ -1183,6 +1334,9 @@ func (e *Engine) Rollback(identifier string) (map[string]any, error) {
 				return err
 			}
 			if err := e.committedUnchanged(); err != nil {
+				return err
+			}
+			if err := e.save(""); err != nil {
 				return err
 			}
 			if err := e.snapshot(""); err != nil {
@@ -1200,7 +1354,7 @@ func (e *Engine) Rollback(identifier string) (map[string]any, error) {
 			_ = e.abortDowngrade()
 			return prepErr
 		}
-		if err := e.checkArtifacts(); err != nil {
+		if err := e.checkArtifacts(false); err != nil {
 			return err
 		}
 		if err := e.rollbackLocked(); err != nil {
@@ -1276,7 +1430,7 @@ func (e *Engine) Recover(identifier string) (map[string]any, error) {
 			}
 			e.Host.CancelWatchdog(watchdog)
 		} else {
-			if err := e.checkArtifacts(); err != nil {
+			if err := e.checkArtifacts(true); err != nil {
 				return err
 			}
 			if err := e.rollbackLocked(); err != nil {

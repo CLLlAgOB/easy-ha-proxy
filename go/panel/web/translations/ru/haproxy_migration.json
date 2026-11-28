@@ -1,6 +1,18 @@
 {
   "meta": {"code": "ru", "label": "Русский"},
   "messages": {
+    "HAProxy transition": "Переход HAProxy",
+    "Transition to HAProxy %s LTS": "Переход на HAProxy %s LTS",
+    "Switch HAProxy": "Переключить HAProxy",
+    "Switch to HAProxy %s LTS": "Перейти на HAProxy %s LTS",
+    "Switch to HAProxy %s LTS? Connections may need to reconnect.": "Перейти на HAProxy %s LTS? Соединениям может потребоваться переподключение.",
+    "Switching HAProxy…": "Переключение HAProxy…",
+    "Migration requires Ubuntu 24.04 or Debian 12 on AMD64 or ARM64": "Для перехода нужна Ubuntu 24.04 или Debian 12 с архитектурой AMD64 или ARM64",
+    "Confirm the HAProxy transition for this platform": "Подтвердите переход HAProxy для этой платформы",
+    "Select the qualified HAProxy branch for this platform": "Выберите ветку HAProxy, поддерживаемую на этой платформе",
+    "The target HAProxy branch is already installed; use updates within its branch": "Целевая ветка HAProxy уже установлена. Используйте обновления внутри ветки.",
+    "Migration requires a verified HAProxy installation from the distribution": "Для перехода нужна проверенная установка HAProxy из репозиториев дистрибутива",
+    "Prepare and review the HAProxy transition": "Подготовьте и проверьте план перехода HAProxy",
     "Switch to HAProxy 3.4 LTS? Connections may need to reconnect.": "Перейти на HAProxy 3.4 LTS? Соединениям может потребоваться переподключение.",
     "Confirm the transition to HAProxy 3.4 LTS": "Подтвердите переход на HAProxy 3.4 LTS",
     "Update host services before using the automatic HAProxy transition": "Для перехода обновите службы хоста",

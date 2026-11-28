@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/alerts"
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxypkg"
 	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/pyx"
 )
 
@@ -76,8 +77,9 @@ func (d *Daemon) migrationToolDigest() (string, error) {
 }
 
 func (d *Daemon) migrationOffer(plan map[string]any) map[string]any {
+	platform := migrationPlatform()
 	result := func(state, reason string) map[string]any {
-		return map[string]any{"target_branch": "3.4", "state": state, "reason": reason}
+		return map[string]any{"target_branch": platform.Target, "state": state, "reason": reason}
 	}
 	if _, err := d.migrationToolDigest(); err != nil {
 		return result("blocked", "Update host services before preparing a HAProxy migration")
@@ -87,17 +89,17 @@ func (d *Daemon) migrationOffer(plan map[string]any) map[string]any {
 	}
 	m, _ := planComponentMap(plan)
 	details := pyx.Map(m["haproxy"]["details"])
-	if details["branch"] == "3.4" && details["binary_matches"] == true {
-		return result("blocked", "HAProxy 3.4 is already installed; use updates within its branch")
+	if platform.Target == "" || details["qualified"] != true {
+		return result("blocked", "Migration requires "+haproxypkg.SupportedHosts)
 	}
-	if details["qualified"] != true {
-		return result("blocked", "Migration requires Ubuntu 24.04 on AMD64 or ARM64")
+	if details["branch"] == platform.Target && details["binary_matches"] == true {
+		return result("blocked", "The target HAProxy branch is already installed; use updates within its branch")
 	}
-	if details["package"] != "haproxy" || !strings.HasPrefix(pyx.StrOr(details["installed_version"]), "2.8.") ||
-		!strings.HasPrefix(pyx.StrOr(details["running_version"]), "2.8.") || details["binary_matches"] != true {
-		return result("blocked", "Migration requires a verified distribution HAProxy 2.8 installation")
+	if details["package"] != "haproxy" || !strings.HasPrefix(pyx.StrOr(details["installed_version"]), platform.Baseline+".") ||
+		!strings.HasPrefix(pyx.StrOr(details["running_version"]), platform.Baseline+".") || details["binary_matches"] != true {
+		return result("blocked", "Migration requires a verified HAProxy installation from the distribution")
 	}
-	return result("available", "Prepare and review the transition from HAProxy 2.8 to 3.4 LTS")
+	return result("available", "Prepare and review the HAProxy transition")
 }
 
 func migrationFingerprint(op map[string]any) string {
@@ -200,18 +202,8 @@ func (d *Daemon) migrationStatus(plan map[string]any) map[string]any {
 	return offer
 }
 
-func migrationPlatformSupported() bool {
-	raw, err := os.ReadFile("/etc/os-release")
-	if err != nil {
-		return false
-	}
-	release := map[string]string{}
-	for _, line := range strings.Split(string(raw), "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok {
-			release[k] = strings.Trim(v, `"`)
-		}
-	}
-	return release["ID"] == "ubuntu" && release["VERSION_ID"] == "24.04" && (runtime.GOARCH == "arm64" || runtime.GOARCH == "amd64")
+func migrationPlatform() haproxypkg.Platform {
+	return haproxypkg.ReadPlatform("/etc/os-release", runtime.GOARCH)
 }
 
 func (d *Daemon) automaticMigrationTool() ([]string, error) {
@@ -222,6 +214,7 @@ func (d *Daemon) automaticMigrationTool() ([]string, error) {
 }
 
 func (d *Daemon) automaticMigrationOffer(plan, op map[string]any, recoveryBlocked bool) map[string]any {
+	platform := migrationPlatform()
 	result := func(can, current bool, reason string) map[string]any {
 		return map[string]any{"can_start": can, "current": current, "reason": reason}
 	}
@@ -231,8 +224,8 @@ func (d *Daemon) automaticMigrationOffer(plan, op map[string]any, recoveryBlocke
 	if recoveryBlocked {
 		return result(false, false, "HAProxy update or recovery is in progress. Other maintenance is blocked.")
 	}
-	if !migrationPlatformSupported() {
-		return result(false, false, "Migration requires Ubuntu 24.04 on AMD64 or ARM64")
+	if platform.Target == "" {
+		return result(false, false, "Migration requires "+haproxypkg.SupportedHosts)
 	}
 	var details map[string]any
 	if plan != nil {
@@ -241,12 +234,13 @@ func (d *Daemon) automaticMigrationOffer(plan, op map[string]any, recoveryBlocke
 	}
 	var current bool
 	if plan != nil && !planIsExpired(plan) && details["binary_matches"] == true {
-		current = details["branch"] == "3.4"
+		current = details["branch"] == platform.Target
 	} else {
-		current = op != nil && op["phase"] == "committed" && op["target_verified"] == true
+		current = op != nil && op["phase"] == "committed" && op["target_verified"] == true &&
+			strings.HasPrefix(pyx.StrOr(op["target_runtime_version"]), platform.Target+".")
 	}
 	if current {
-		return result(false, true, "HAProxy 3.4 is already installed; use updates within its branch")
+		return result(false, true, "The target HAProxy branch is already installed; use updates within its branch")
 	}
 	return result(true, false, "Configuration checks, package preparation and the transition run automatically after confirmation.")
 }
@@ -277,6 +271,10 @@ func (d *Daemon) migrationWorker(jobID string, lock *os.File, review map[string]
 		command, err := d.hostAgentTool("haproxy-migrate", "Update host services before preparing a HAProxy migration")
 		if err != nil {
 			return err
+		}
+		target := migrationPlatform().Target
+		if target == "" {
+			return uErr("dependency", "Migration requires "+haproxypkg.SupportedHosts)
 		}
 		previous := readHAProxyOperation(d.Opts.HAProxyMigrationState)
 		prevID := pyx.Map(anyMap(previous))["id"]
@@ -315,7 +313,7 @@ func (d *Daemon) migrationWorker(jobID string, lock *os.File, review map[string]
 		var message string
 		if review == nil && !automatic {
 			if code != 0 || op == nil || op["id"] == prevID || op["phase"] != "prepared" || op["kind"] != "migration" ||
-				!strings.HasPrefix(pyx.StrOr(op["target_runtime_version"]), "3.4.") || op["engine_digest"] != digest {
+				!strings.HasPrefix(pyx.StrOr(op["target_runtime_version"]), target+".") || op["engine_digest"] != digest {
 				return uErr("verification_failed", "HAProxy migration preparation failed; review the job log")
 			}
 			txID, err := identifier(op["id"], "migration transaction id")
@@ -340,7 +338,7 @@ func (d *Daemon) migrationWorker(jobID string, lock *os.File, review map[string]
 				wrong = op == nil || op["id"] != review["transaction_id"]
 			}
 			if code != 0 || op == nil || wrong ||
-				(automatic && (op["kind"] != "migration" || !strings.HasPrefix(pyx.StrOr(op["target_runtime_version"]), "3.4.") ||
+				(automatic && (op["kind"] != "migration" || !strings.HasPrefix(pyx.StrOr(op["target_runtime_version"]), target+".") ||
 					op["engine_digest"] != digest)) ||
 				op["phase"] != "committed" || op["target_verified"] != true {
 				return uErr("verification_failed", "HAProxy migration failed; review its recovery status and job log")
@@ -358,18 +356,22 @@ func (d *Daemon) migrationWorker(jobID string, lock *os.File, review map[string]
 }
 
 func (d *Daemon) startHAProxyMigration(req map[string]any, apply bool) (map[string]any, error) {
+	target := migrationPlatform().Target
+	if target == "" {
+		return nil, uErr("dependency", "Migration requires "+haproxypkg.SupportedHosts)
+	}
 	var planID string
 	if apply {
-		if req["confirmation"] != haproxyMigrationConfirmation {
-			return nil, uErr("invalid", "Type MIGRATE 3.4 to confirm the HAProxy transition")
+		if req["confirmation"] != "MIGRATE "+target {
+			return nil, uErr("invalid", "Confirm the HAProxy transition for this platform")
 		}
 		id, err := identifier(req["plan_id"], "migration plan id")
 		if err != nil {
 			return nil, err
 		}
 		planID = id
-	} else if req["target_branch"] != "3.4" {
-		return nil, uErr("invalid", "Only the qualified HAProxy 3.4 LTS migration is supported")
+	} else if req["target_branch"] != target {
+		return nil, uErr("invalid", "Select the qualified HAProxy branch for this platform")
 	}
 	lock, err := d.acquireOperation(false, false)
 	if err != nil {
@@ -425,14 +427,15 @@ func (d *Daemon) startHAProxyMigration(req map[string]any, apply bool) (map[stri
 }
 
 func (d *Daemon) startHAProxyTransition(req map[string]any) (map[string]any, error) {
-	if req["target_branch"] != "3.4" || req["confirmed"] != true {
-		return nil, uErr("invalid", "Confirm the transition to HAProxy 3.4 LTS")
+	target := migrationPlatform().Target
+	if target == "" {
+		return nil, uErr("dependency", "Migration requires "+haproxypkg.SupportedHosts)
+	}
+	if req["target_branch"] != target || req["confirmed"] != true {
+		return nil, uErr("invalid", "Confirm the HAProxy transition for this platform")
 	}
 	if _, err := d.automaticMigrationTool(); err != nil {
 		return nil, err
-	}
-	if !migrationPlatformSupported() {
-		return nil, uErr("dependency", "Migration requires Ubuntu 24.04 on AMD64 or ARM64")
 	}
 	lock, err := d.acquireOperation(false, false)
 	if err != nil {

@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxypkg"
 )
 
 // The HAProxy component: installed, running and eligible versions, read
@@ -219,30 +221,18 @@ func hasAnyPrefix(s string, prefixes ...string) bool {
 	return false
 }
 
-func hostQualified() bool {
-	raw, err := os.ReadFile(osReleasePath)
-	if err != nil {
-		return false
-	}
-	release := map[string]string{}
-	for _, line := range splitLines(string(raw)) {
-		if k, v, ok := strings.Cut(line, "="); ok {
-			release[k] = v
-		}
-	}
-	m := machine()
-	return strings.Trim(release["ID"], `"`) == "ubuntu" && strings.Trim(release["VERSION_ID"], `"`) == "24.04" &&
-		(m == "aarch64" || m == "x86_64")
-}
-
 type haproxyPaths struct {
 	binary, lastUpdate, lastMigration, protection string
 }
 
 func probeHAProxy(runner Runner, paths haproxyPaths, metadata M) M {
-	qualified := hostQualified()
+	platform := haproxypkg.ReadPlatform(osReleasePath, machine())
+	qualified := platform.Target != ""
 	d := M{"installed_version": nil, "running_version": nil, "candidate_version": nil, "branch": nil, "provider": nil,
 		"protected": false, "needs_reload": false, "qualified": qualified, "apt": metadata}
+	if qualified {
+		d["migration_target_branch"] = platform.Target
+	}
 	result := func(state, summary string) M {
 		return M{"id": "haproxy", "state": state, "actionable": state == "available", "summary": summary,
 			"current_version": d["installed_version"], "available_version": d["candidate_version"],
@@ -274,12 +264,12 @@ func probeHAProxy(runner Runner, paths haproxyPaths, metadata M) M {
 	}
 	provider, source := "Distribution", "APT"
 	if qualified {
-		provider, source = "Ubuntu", "Ubuntu noble"
+		provider, source = platform.Distribution, platform.Distribution+" "+platform.Codename
 	}
 	if name == "haproxy-awslc" {
 		provider = "HAProxy Technologies"
 		if qualified {
-			source = "ha34 / Ubuntu noble"
+			source = "ha" + strings.ReplaceAll(platform.Target, ".", "") + " / " + platform.Distribution + " " + platform.Codename
 		}
 	}
 	d["package"], d["installed_version"], d["branch"], d["provider"], d["source"] = name, version, branch, provider, source
@@ -329,7 +319,7 @@ func probeHAProxy(runner Runner, paths haproxyPaths, metadata M) M {
 			d["manual_update"] = "distribution"
 		}
 		return result("blocked", "HAProxy is excluded from OS package updates in the panel, including manual installation. "+
-			"Controlled updates require Ubuntu 24.04 ARM64 or AMD64. On this platform, update HAProxy separately over SSH "+
+			"Controlled updates require Ubuntu 24.04 or Debian 12 on AMD64 or ARM64. On this platform, update HAProxy separately over SSH "+
 			"or the server console and restore package holds afterwards.")
 	}
 	if metadata["fresh"] != true {
@@ -339,9 +329,9 @@ func probeHAProxy(runner Runner, paths haproxyPaths, metadata M) M {
 	if candidate == "" {
 		return result("unknown", "No eligible HAProxy package candidate was found.")
 	}
-	supported := "2.8"
+	supported := platform.Baseline
 	if name == "haproxy-awslc" {
-		supported = "3.4"
+		supported = platform.Target
 	}
 	if !strings.HasPrefix(version, supported+".") || !strings.HasPrefix(candidate, supported+".") {
 		return result("blocked", "A different HAProxy branch requires a separate migration.")

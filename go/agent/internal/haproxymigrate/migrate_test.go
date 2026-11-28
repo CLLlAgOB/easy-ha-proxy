@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxypkg"
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
@@ -74,10 +75,10 @@ func (f *fakeHost) Machine() (string, error) {
 	}
 	return strings.Repeat("m", 64), nil
 }
-func (f *fakeHost) WorkerDigest(string) (string, error) { return f.workerDig, nil }
-func (f *fakeHost) StartSeed(string, string) error      { return nil }
-func (f *fakeHost) Watchdog(string, string) error       { return nil }
-func (f *fakeHost) CancelWatchdog(string)               { f.cancelled = true }
+func (f *fakeHost) WorkerDigest(string) (string, error)   { return f.workerDig, nil }
+func (f *fakeHost) StartSeed(string, string) error        { return nil }
+func (f *fakeHost) Watchdog(string, string, string) error { return nil }
+func (f *fakeHost) CancelWatchdog(string)                 { f.cancelled = true }
 func (f *fakeHost) ControlJournal(def string) (string, error) {
 	if f.ctrlJour != "" {
 		return f.ctrlJour, nil
@@ -327,18 +328,23 @@ func TestSavedRecoveryCommandAndArtifactIntegrity(t *testing.T) {
 	if err := e.storeRecoveryCommands(); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.checkArtifacts(); err != nil {
+	if err := e.checkArtifacts(true); err != nil {
 		t.Fatalf("expected valid artifacts: %v", err)
 	}
 	// Tampering saved recovery binary fails check
 	_ = os.WriteFile(filepath.Join(txDir, "recover-agent"), []byte("tampered"), 0o700)
-	if err := e.checkArtifacts(); err == nil || !strings.Contains(err.Error(), "recovery command integrity") {
+	if err := e.checkArtifacts(false); err == nil || !strings.Contains(err.Error(), "recovery command integrity") {
 		t.Fatalf("expected recovery integrity failure, got %v", err)
 	}
 	// Changed current binary fails check
 	_ = os.WriteFile(fakeExe, []byte("binary-v2"), 0o755)
-	if err := e.checkArtifacts(); err == nil || !strings.Contains(err.Error(), "implementation changed") {
+	if err := e.checkArtifacts(true); err == nil || !strings.Contains(err.Error(), "implementation changed") {
 		t.Fatalf("expected implementation changed failure, got %v", err)
+	}
+	e.State["phase"] = "committed"
+	_ = os.WriteFile(filepath.Join(txDir, "recover-agent"), []byte("binary-v1"), 0o700)
+	if err := e.checkArtifacts(false); err != nil {
+		t.Fatalf("committed rollback rejected a newer agent: %v", err)
 	}
 }
 
@@ -396,6 +402,81 @@ func TestCommittedUnchangedRejectsLaterPackageRevision(t *testing.T) {
 	}
 	if len(h.cmdCalls) != 0 {
 		t.Fatalf("unexpected commands: %v", h.cmdCalls)
+	}
+}
+
+func TestCommittedRollbackAcceptsInstallerFormattingAndRestoresOriginalFiles(t *testing.T) {
+	dir := t.TempDir()
+	p := DefaultPaths()
+	p.Variables = filepath.Join(dir, "vars.yml")
+	p.Priorities = filepath.Join(dir, "pin")
+	p.Policy = filepath.Join(dir, "policy")
+	p.Binary = filepath.Join(dir, "haproxy")
+	p.Config = filepath.Join(dir, "haproxy.cfg")
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const original = "root_domain: example.test\nitems: [one, two]\n"
+	write(p.Config, "configuration")
+	write(p.Binary, "target binary")
+	write(filepath.Join(dir, "saved-vars"), original)
+	write(p.Variables, "items:\n- one\n- two\nroot_domain: example.test\nhaproxy_package_branch: '3.4'\nhaproxy_package_provider: haproxy-technologies\n")
+	pin := haproxypkg.Pin("3.4")
+	write(p.Priorities, pin)
+	var legacy strings.Builder
+	for _, line := range strings.SplitAfter(pin, "\n") {
+		if !strings.HasPrefix(line, "#") {
+			legacy.WriteString(line)
+		}
+	}
+	e := NewEngine(&p, &fakeHost{pkgsFn: func() (map[string]string, error) { return nil, nil }})
+	e.Directory = dir
+	committed, err := e.migrationVariables([]byte(original))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.State = map[string]any{
+		"target_binary_digest":         bytesDigest([]byte("target binary")),
+		"committed_vars_digest":        bytesDigest(committed),
+		"committed_repository_digests": map[string]any{p.Priorities: bytesDigest([]byte(legacy.String()))},
+		"files": map[string]any{
+			p.Config:     map[string]any{"digest": bytesDigest([]byte("configuration"))},
+			p.Variables:  map[string]any{"exists": true, "file": "saved-vars", "digest": bytesDigest([]byte(original)), "uid": os.Getuid(), "gid": os.Getgid()},
+			p.Priorities: map[string]any{"exists": false},
+			p.Policy:     map[string]any{"exists": false},
+		},
+	}
+	if err := e.committedUnchanged(); err != nil {
+		t.Fatal(err)
+	}
+	write(p.Priorities, strings.Replace(pin, "990", "991", 1))
+	if err := e.committedUnchanged(); err == nil {
+		t.Fatal("effective APT policy change was accepted")
+	}
+	if err := e.restore(p.Priorities); err == nil {
+		t.Fatal("unverified APT policy was restored over")
+	}
+	write(p.Priorities, pin)
+	current, err := os.ReadFile(p.Variables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(p.Variables, strings.Replace(string(current), "example.test", "changed.test", 1))
+	if err := e.committedUnchanged(); err == nil {
+		t.Fatal("effective installer variable change was accepted")
+	}
+	write(p.Variables, string(current))
+	if err := e.restore(p.Priorities); err != nil || lexists(p.Priorities) {
+		t.Fatalf("could not restore original APT policy: %v", err)
+	}
+	if err := e.restore(p.Variables); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(p.Variables); err != nil || string(raw) != original {
+		t.Fatalf("installer variables were not restored: %s, %v", raw, err)
 	}
 }
 

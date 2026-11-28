@@ -49,8 +49,7 @@ const (
 	alertChangelogLines    = 15
 	channelMismatchMessage = "This update was checked for a different release channel than the one " +
 		"this gateway is set to. Save the channel first, or run the check again."
-	haproxyMigrationConfirmation = "MIGRATE 3.4"
-	sshProtectionJob             = "ssh-protection"
+	sshProtectionJob = "ssh-protection"
 )
 
 var (

@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CLLlAgOB/easy-ha-proxy/go/agent/internal/haproxypkg"
 	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 )
@@ -50,6 +51,7 @@ type Engine struct {
 	Observer  func(summary map[string]any)
 	Vendor    string
 	KeyURL    string
+	platform  haproxypkg.Platform
 
 	lockDepth int
 	// Optional test/smoke hooks
@@ -70,7 +72,6 @@ func NewEngine(paths *Paths, host Host) *Engine {
 		Paths:  p,
 		Host:   host,
 		State:  map[string]any{},
-		Vendor: DefaultVendorURL,
 		KeyURL: DefaultKeyURL,
 	}
 }
@@ -401,6 +402,11 @@ func (e *Engine) download(rawURL, destination, expected string, limit int64) err
 }
 
 func (e *Engine) authenticatedPackages(architecture string) ([]PackageRecord, error) {
+	vendor := e.platform.Repository() + "/"
+	if e.Vendor != "" {
+		vendor = e.Vendor
+	}
+	distribution := vendor + "dists/" + e.platform.Codename + "/"
 	defaultsRaw, err := os.ReadFile(filepath.Join(e.Paths.Source, "ansible/roles/haproxy/defaults/main.yml"))
 	if err != nil {
 		return nil, err
@@ -429,7 +435,7 @@ func (e *Engine) authenticatedPackages(architecture string) ([]PackageRecord, er
 		return nil, err
 	}
 	inRelPath := filepath.Join(e.Directory, "InRelease")
-	if err := e.download(e.Vendor+"dists/noble/InRelease", inRelPath, "", 1024*1024); err != nil {
+	if err := e.download(distribution+"InRelease", inRelPath, "", 1024*1024); err != nil {
 		return nil, err
 	}
 	relPath := filepath.Join(e.Directory, "Release")
@@ -449,6 +455,9 @@ func (e *Engine) authenticatedPackages(architecture string) ([]PackageRecord, er
 		return nil, migErr("Repository metadata is empty")
 	}
 	fields := paras[0]
+	if fields["Codename"] != e.platform.Codename {
+		return nil, migErr("Signed repository codename does not match the host")
+	}
 	published, err := mail.ParseDate(fields["Date"])
 	if err != nil {
 		return nil, migErr("Repository metadata date is unreadable")
@@ -470,7 +479,7 @@ func (e *Engine) authenticatedPackages(architecture string) ([]PackageRecord, er
 		return nil, migErr("Signed repository metadata has no unique architecture index")
 	}
 	pkgGzPath := filepath.Join(e.Directory, "Packages.gz")
-	if err := e.download(e.Vendor+"dists/noble/"+relative, pkgGzPath, matches[0][1], 64*1024*1024); err != nil {
+	if err := e.download(distribution+relative, pkgGzPath, matches[0][1], 64*1024*1024); err != nil {
 		return nil, err
 	}
 	gzFile, err := os.Open(pkgGzPath)
@@ -493,12 +502,12 @@ func (e *Engine) authenticatedPackages(architecture string) ([]PackageRecord, er
 	records := ParseParagraphs(string(idxBytes))
 	var candidates []map[string]string
 	for _, r := range records {
-		if r["Package"] == "haproxy-awslc" && r["Architecture"] == architecture && strings.HasPrefix(r["Version"], "3.4.") {
+		if r["Package"] == "haproxy-awslc" && r["Architecture"] == architecture && strings.HasPrefix(r["Version"], e.platform.Target+".") {
 			candidates = append(candidates, r)
 		}
 	}
 	if len(candidates) == 0 {
-		return nil, migErr("No HAProxy 3.4 package for this architecture")
+		return nil, migErr("No HAProxy %s package for this architecture", e.platform.Target)
 	}
 	target := candidates[0]
 	for _, cand := range candidates[1:] {
@@ -528,7 +537,7 @@ func (e *Engine) authenticatedPackages(architecture string) ([]PackageRecord, er
 			return nil, migErr("Invalid signed package filename")
 		}
 		dest := filepath.Join(e.Directory, pkg["Package"]+".deb")
-		if err := e.download(e.Vendor+fn, dest, pkg["SHA256"], 64*1024*1024); err != nil {
+		if err := e.download(vendor+fn, dest, pkg["SHA256"], 64*1024*1024); err != nil {
 			return nil, err
 		}
 		if err := e.checkDeb(dest, pkg["Package"], pkg["Version"], architecture); err != nil {
@@ -557,33 +566,21 @@ func (e *Engine) checkDeb(path, pkg, version, architecture string) error {
 }
 
 func (e *Engine) nativePreflight() (string, map[string]string, error) {
-	osRaw, err := os.ReadFile(osReleasePath)
-	if err != nil {
-		return "", nil, err
-	}
-	osFields := map[string]string{}
-	for _, line := range strings.Split(string(osRaw), "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok {
-			osFields[k] = strings.Trim(strings.TrimSpace(v), `"`)
-		}
-	}
-	if osFields["ID"] != "ubuntu" || osFields["VERSION_ID"] != "24.04" {
-		return "", nil, migErr("Only Ubuntu 24.04 is qualified for this migration")
-	}
 	archRes, err := e.Host.Command([]string{"/usr/bin/dpkg", "--print-architecture"}, CmdOpts{Check: true})
 	if err != nil {
 		return "", nil, err
 	}
 	architecture := strings.TrimSpace(archRes.Stdout)
+	e.platform = haproxypkg.ReadPlatform(osReleasePath, architecture)
+	if e.platform.Target == "" {
+		return "", nil, migErr("HAProxy migration requires %s", haproxypkg.SupportedHosts)
+	}
 	auditRes, err := e.Host.Command([]string{"/usr/bin/dpkg", "--audit"}, CmdOpts{Check: true})
 	if err != nil {
 		return "", nil, err
 	}
 	if strings.TrimSpace(auditRes.Stdout) != "" {
 		return "", nil, migErr("Resolve unfinished package operations before migration")
-	}
-	if architecture != "arm64" && architecture != "amd64" {
-		return "", nil, migErr("Only ARM64 and AMD64 are qualified")
 	}
 	packages, err := e.Host.Packages()
 	if err != nil {
@@ -593,15 +590,15 @@ func (e *Engine) nativePreflight() (string, map[string]string, error) {
 	if e.Patch && packages["haproxy-awslc"] != "" {
 		name = "haproxy-awslc"
 	}
-	branch := "2.8"
+	branch := e.platform.Baseline
 	if name == "haproxy-awslc" {
-		branch = "3.4"
+		branch = e.platform.Target
 	}
 	if !strings.HasPrefix(packages[name], branch+".") {
-		return "", nil, migErr("Preparation requires the distribution HAProxy 2.8 package")
+		return "", nil, migErr("Preparation requires the qualified %s %s package", name, branch)
 	}
 	if !e.Patch && packages["haproxy-awslc"] != "" {
-		return "", nil, migErr("A provider migration must start on distribution HAProxy 2.8")
+		return "", nil, migErr("A provider migration must start on distribution HAProxy %s", e.platform.Baseline)
 	}
 	if !e.Host.Active("haproxy.service") || !e.Host.Active("haproxy-controld.service") {
 		return "", nil, migErr("HAProxy and its control service must be healthy before preparation")
@@ -1048,17 +1045,20 @@ func (e *Engine) storeRecoveryCommands() error {
 	return atomicWrite(filepath.Join(e.Directory, "recover-agent"), data, 0o700, 0, 0)
 }
 
-func (e *Engine) checkArtifacts() error {
-	exe, err := engineBinaryFunc()
-	if err != nil {
-		return err
+func (e *Engine) checkArtifacts(requireRecoveryEngine bool) error {
+	recoveryBinary, recoveryDigest := e.recoveryCommand()
+	if requireRecoveryEngine {
+		exe, err := engineBinaryFunc()
+		if err != nil {
+			return err
+		}
+		curDig, err := fileDigest(exe)
+		if err != nil || curDig != recoveryDigest {
+			return migErr("Migration implementation changed; use the saved recovery command or prepare afresh")
+		}
 	}
-	curDig, err := fileDigest(exe)
-	if err != nil || curDig != strVal(e.State["engine_digest"]) {
-		return migErr("Migration implementation changed; use the saved recovery command or prepare afresh")
-	}
-	recDig, err := fileDigest(filepath.Join(e.Directory, "recover-agent"))
-	if err != nil || recDig != strVal(e.State["engine_digest"]) {
+	recDig, err := fileDigest(filepath.Join(e.Directory, recoveryBinary))
+	if err != nil || recDig != recoveryDigest {
 		return migErr("Saved recovery command integrity check failed")
 	}
 	if unixNowFloat()-floatVal(e.State["created_at"]) > 86400 && strVal(e.State["phase"]) == "prepared" {
@@ -1090,7 +1090,7 @@ func (e *Engine) checkArtifacts() error {
 	return nil
 }
 
-// Prepare stages a provider migration from distribution HAProxy 2.8 to 3.4 LTS.
+// Prepare stages the provider migration for the installed distribution.
 func (e *Engine) Prepare() (map[string]any, error) {
 	var summary map[string]any
 	err := e.withLock(func() error {
@@ -1153,6 +1153,7 @@ func (e *Engine) Prepare() (map[string]any, error) {
 			"engine_digest": engDig,
 			"holds":         savedHolds,
 			"old_version":   packages["haproxy"],
+			"target_branch": e.platform.Target,
 			"phase":         "preparing",
 		}
 		if err := e.save(""); err != nil {
@@ -1343,10 +1344,10 @@ func (e *Engine) preparePatchInner(expectedVersion string, reinstall bool) (map[
 			return err
 		}
 		name := "haproxy"
-		branch := "2.8"
+		branch := e.platform.Baseline
 		if packages["haproxy-awslc"] != "" {
 			name = "haproxy-awslc"
-			branch = "3.4"
+			branch = e.platform.Target
 		}
 		verRe := regexp.MustCompile(`^` + regexp.QuoteMeta(branch) + `\.[0-9]+[A-Za-z0-9.+:~_-]*$`)
 		if !verRe.MatchString(expectedVersion) {

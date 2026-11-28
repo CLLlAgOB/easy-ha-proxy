@@ -21,9 +21,9 @@ test("HAProxy transition jobs show their own progress without a guessed percent"
   assert.equal(prepare.label, "Preparing the HAProxy transition…");
   const migrate = core.progressModel({operation: "haproxy-migrate", progress: {phase: "verifying"}});
   assert.equal(migrate.percent, null);
-  assert.equal(migrate.label, "Switching HAProxy to 3.4 LTS…");
+  assert.equal(migrate.label, "Switching HAProxy…");
   assert.equal(core.progressModel({operation: "haproxy-transition", progress: {phase: "prepare"}}).label,
-    "Switching HAProxy to 3.4 LTS…");
+    "Switching HAProxy…");
 });
 
 test("OS security jobs keep their own labels and do not invent progress percentages", () => {
@@ -336,7 +336,7 @@ test("an unsettled or failed operation shows the card, a settled one does not", 
   }
 });
 
-test("the move to 3.4 shows the card only on a branch the plan found older", () => {
+test("the migration card follows the target branch advertised by the host", () => {
   const offer = {automatic: {current: false, can_start: true}};
   assert.equal(core.haproxyAttention(haproxy("current", {branch: "2.8"}), {now: NOW, migration: offer}), true);
   // The broker's "current" is false once its plan expires; the plan saw 3.4.
@@ -344,6 +344,10 @@ test("the move to 3.4 shows the card only on a branch the plan found older", () 
   assert.equal(core.haproxyOnTarget(haproxy("current"), offer), true);
   assert.equal(core.haproxyAttention(null, {now: NOW, migration: offer}), false);
   assert.equal(core.haproxyOnTarget(haproxy("current", {branch: "2.8"}), offer), false);
+  const bookworm = {...offer, target_branch: "3.2"};
+  assert.equal(core.haproxyAttention(haproxy("current", {branch: "2.6"}), {now: NOW, migration: bookworm}), true);
+  assert.equal(core.haproxyAttention(haproxy("current", {branch: "3.2"}), {now: NOW, migration: bookworm}), false);
+  assert.equal(core.haproxyOnTarget(haproxy("current", {branch: "3.4"}), bookworm), false);
 });
 
 test("completing a panel or HAProxy update triggers a page reload for fresh chrome", () => {

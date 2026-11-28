@@ -360,35 +360,38 @@ func (a *App) registerUpdatesOps() {
 		if err != nil {
 			return err
 		}
-		if payload.Value("target_branch") != "3.4" || payload.Value("confirmed") != true {
-			return Abort(400, "Confirm the transition to HAProxy 3.4 LTS")
+		target := payload.Value("target_branch")
+		if (target != "3.2" && target != "3.4") || payload.Value("confirmed") != true {
+			return Abort(400, "Confirm the HAProxy transition for this platform")
 		}
 		if blocked, err := c.migrationConfigurationError(); blocked {
 			return err
 		}
 		ForgetHAProxyVersion()
-		return c.daemon(newMap("action", "start_haproxy_transition", "target_branch", "3.4", "confirmed", true), true)
+		return c.daemon(newMap("action", "start_haproxy_transition", "target_branch", target, "confirmed", true), true)
 	})
 	a.Handle("system_updates.prepare_haproxy_migration", func(c *Ctx) error {
 		payload, err := c.jsonPayloadFields([]string{"target_branch"})
 		if err != nil {
 			return err
 		}
-		if payload.Value("target_branch") != "3.4" {
-			return Abort(400, "Only the qualified HAProxy 3.4 LTS migration is supported")
+		target := payload.Value("target_branch")
+		if target != "3.2" && target != "3.4" {
+			return Abort(400, "Select the qualified HAProxy branch for this platform")
 		}
 		if blocked, err := c.migrationConfigurationError(); blocked {
 			return err
 		}
-		return c.daemon(newMap("action", "prepare_haproxy_migration", "target_branch", "3.4"), true)
+		return c.daemon(newMap("action", "prepare_haproxy_migration", "target_branch", target), true)
 	})
 	a.Handle("system_updates.apply_haproxy_migration", func(c *Ctx) error {
 		payload, err := c.jsonPayloadFields([]string{"plan_id", "confirmation"})
 		if err != nil {
 			return err
 		}
-		if payload.Value("confirmation") != "MIGRATE 3.4" {
-			return Abort(400, "Type MIGRATE 3.4 to confirm the HAProxy transition")
+		confirmation := payload.Value("confirmation")
+		if confirmation != "MIGRATE 3.2" && confirmation != "MIGRATE 3.4" {
+			return Abort(400, "Confirm the HAProxy transition for this platform")
 		}
 		planID, err := updIdentifier(payload.Value("plan_id"), "migration plan id")
 		if err != nil {
@@ -398,7 +401,7 @@ func (a *App) registerUpdatesOps() {
 			return err
 		}
 		ForgetHAProxyVersion()
-		return c.daemon(newMap("action", "apply_haproxy_migration", "plan_id", planID, "confirmation", "MIGRATE 3.4"), true)
+		return c.daemon(newMap("action", "apply_haproxy_migration", "plan_id", planID, "confirmation", confirmation), true)
 	})
 	a.Handle("system_updates.reboot", func(c *Ctx) error {
 		payload, err := c.jsonPayloadFields([]string{"confirmation", "expected_boot_id"})
